@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    # macOS-only: reviewer source tools run inside the macOS Seatbelt sandbox
+    # (`sandbox-exec`), so the sandbox test suite requires a macOS runner.
+    runs-on: macos-latest
+    steps:
+      - name: Check out pr-council-mcp
+        uses: actions/checkout@v4
+        with:
+          path: pr-council-mcp
+
+      - name: Check out localmcplib
+        uses: actions/checkout@v4
+        with:
+          repository: salesforce-misc/localmcplib
+          ref: ad4e0617711e09f863ed00428241d4b16d78782a
+          path: localmcplib
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+        working-directory: pr-council-mcp
+
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen
+        working-directory: pr-council-mcp
+
+      # Mirrors `make ci`: ruff format --check, ruff check, mypy --strict,
+      # and pytest with branch coverage (fail-under 80).
+      - name: Run checks
+        run: make ci
+        working-directory: pr-council-mcp

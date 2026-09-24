@@ -1,0 +1,169 @@
+# pr-council-mcp
+
+`pr-council-mcp` is a local MCP server for durable, multi-model pull-request reviews. Quality and security reviewers
+inspect a PR independently, deliberators filter their findings, and an aggregator prepares a single review for human
+approval before anything is published to GitHub.
+
+It is also an experimental playground running on two related tracks:
+
+- **Infrastructure:** using an MCP seam between the conversational client and a durable service, with LangGraph
+  orchestration and recovery, constrained model tooling, macOS sandboxing, approval-gated side effects, and optional
+  Langfuse telemetry.
+- **Product:** exploring whether multi-model, multi-disposition reviews become more useful when independent quality
+  and security findings go through deliberation, reconciliation, and aggregation before reaching a human.
+
+> **Status: early development (alpha).** The design, tool surface, and configuration are still changing and may
+> break between versions. Expect rough edges, and expect the interfaces to evolve as both tracks are explored.
+
+## Quickstart
+
+The server currently runs on macOS and requires Python 3.12+. Install
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/), `git`, [`rg`](https://github.com/BurntSushi/ripgrep),
+and [`gh`](https://cli.github.com/), then authenticate GitHub:
+
+```bash
+gh auth login
+gh auth status
+```
+
+Create `~/.config/localmcp/localmcp.toml` and select native model providers. The `llm`, `secrets`, and
+`observability` tables are owned by localmcplib; pr-council owns only its `pr_review` table:
+
+```toml
+schema_version = 1
+
+[llm]
+backend = "native"
+
+[secrets.openai_api_key]
+env_vars = ["OPENAI_API_KEY"]
+
+[secrets.anthropic_api_key]
+env_vars = ["ANTHROPIC_API_KEY"]
+
+[server.pr-council-mcp.pr_review.models]
+quality = ["claude-opus-4-8", "gpt-5.6"]
+security = ["claude-opus-4-8", "gpt-5.6"]
+deliberation = "claude-opus-4-8"
+aggregation = "claude-haiku-4-5-20251001"
+```
+
+Set `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY` for the providers used by your selected models. Native secrets may
+instead be stored in the shared `localmcp` keyring service under the `openai_api_key` and `anthropic_api_key`
+accounts.
+
+Install the package on demand from public PyPI in your MCP client configuration.
+
+### Claude Code
+
+Add `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "pr-council-mcp": {
+      "command": "uvx",
+      "args": ["--from", "pr-council-mcp", "pr-council-mcp"]
+    }
+  }
+}
+```
+
+### opencode
+
+Add `opencode.jsonc`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "pr-council-mcp": {
+      "type": "local",
+      "command": ["uvx", "--from", "pr-council-mcp", "pr-council-mcp"]
+    }
+  }
+}
+```
+
+### Example session
+
+The client owns the conversation and handles the operation ID, polling, and preview details. A typical terminal
+session looks like this (output is illustrative):
+
+```text
+$ claude
+> Use pr-council-mcp to review https://github.com/acme/widgets/pull/123.
+  Focus on authorization boundaries and regressions. Show me the review before publishing it.
+
+The council review is ready. It found two issues:
+1. High: a new update path does not enforce repository membership.
+2. Medium: retries can create duplicate audit records.
+
+I have the revision-bound publication preview. Nothing has been published.
+
+> Publish that review.
+
+Published the approved inline comments and COMMENT-only summary to PR #123.
+```
+
+## How it works
+
+Reviews are checkpointed operations rather than one long MCP request. The client starts a review, polls it, presents
+the exact revision-bound preview, and publishes only after explicit approval. Restarts can recover unfinished work,
+and publication revalidates the PR revision and approved payload before writing.
+
+By default the server prepares an isolated managed worktree. Reviewer and deliberator models receive one bounded Bash
+tool inside a read-only macOS Seatbelt sandbox. They can inspect source and Git history with ordinary local tools, but
+cannot write files, access the network or credentials, or execute repository code. A local-checkout mode is also
+available when cloning a large repository is impractical.
+
+The MCP surface intentionally stays small: start, status, preview, commit, and cancel. Published reviews contain
+inline comments plus a `COMMENT`-only summary; the server never approves or rejects a pull request.
+
+## Tools
+
+Inspect the MCP server's tool schema for complete arguments and return models.
+
+| Tool | What it does | Important behavior and requirements |
+| --- | --- | --- |
+| `pr_council_start` | Starts a durable initial or follow-up PR review and returns an opaque operation ID. | Accepts a GitHub PR URL, source mode, finalized context, review mode, optional baseline, iterations, and optional model overrides. It never publishes comments. |
+| `pr_council_get` | Polls review status, progress, failures, and completion data. | The calling agent retains the operation ID and polls until the review is ready, terminal, or needs action. |
+| `pr_council_preview` | Returns the exact revision-bound summary and inline comments. | Read-only. The calling agent presents this payload for human review without changing it. |
+| `pr_council_commit` | Publishes one approved preview as inline comments plus a `COMMENT`-only summary. | Requires the preview revision and payload hash, revalidates the PR endpoints and authenticated GitHub user, and never approves or rejects the PR. |
+| `pr_council_cancel` | Requests cooperative cancellation of one owned operation. | Cancellation is unavailable once publication has begun. |
+
+## Basic configuration
+
+Configuration lives at `~/.config/localmcp/localmcp.toml`, or beneath `$XDG_CONFIG_HOME` when set. Shared root values
+are inherited by every local MCP server and `[server.pr-council-mcp]` overrides this server's application settings.
+Unknown application keys are rejected. The quickstart configuration uses the default reviewer matrix.
+
+Secrets resolve from declared environment aliases first and the shared `localmcp` OS-keyring service second. The
+native backend resolves `openai_api_key` and `anthropic_api_key` as required by the selected models. GitHub
+authentication is owned by `gh`, with `GH_TOKEN` or `GITHUB_TOKEN` available as overrides. Secret values are never
+logged.
+
+Structured logs are written only to
+`~/.local/state/localmcp/pr-council-mcp/logs/pr-council-mcp.log` (or beneath `$XDG_STATE_HOME`) because stdout and
+stderr carry the MCP protocol. Langfuse tracing is optional and enabled with `LOCALMCP_LANGFUSE_ENABLED=true`.
+Tool inputs and outputs remain suppressed unless `LOCALMCP_LANGFUSE_CAPTURE_PAYLOADS=true` is also set.
+
+## Development
+
+Clone [localmcplib](https://github.com/salesforce-misc/localmcplib) beside this repository, then run:
+
+```bash
+uv sync --frozen
+make ci
+uv run python -m pr_council.server
+```
+
+The checked-in `.mcp.json` and `opencode.jsonc` use that local environment. Launch Claude Code or opencode from the
+repository root to make the development checkout available as `pr-council-mcp`.
+
+See [AGENTS.md](AGENTS.md) for detailed architecture and implementation contracts. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for contribution guidance.
+
+## License
+
+[Apache-2.0](LICENSE.txt)

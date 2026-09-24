@@ -1,0 +1,86 @@
+[project]
+name = "pr-council-mcp"
+version = "0.2.0"
+description = "Standalone local MCP server for durable, multi-model pull-request reviews over stdio."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE.txt"]
+authors = [{ name = "Demian Brecht", email = "dbrecht@salesforce.com" }]
+maintainers = [{ name = "Demian Brecht", email = "dbrecht@salesforce.com" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "fastmcp>=4.0.5",
+    "langchain>=1.4.2,<2",
+    "langchain-core>=1.6.4",
+    "localmcplib[sandbox,server,workflows]>=0.1.3",
+    "pydantic>=2.13.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/salesforce-misc/pr-council-mcp"
+Repository = "https://github.com/salesforce-misc/pr-council-mcp"
+Issues = "https://github.com/salesforce-misc/pr-council-mcp/issues"
+
+[project.optional-dependencies]
+langfuse = ["localmcplib[telemetry]>=0.1.3"]
+
+[project.scripts]
+pr-council-mcp = "pr_council.server:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+package = true
+native-tls = true
+
+# Keep local development reproducible while localmcplib is prepared for its
+# first public PyPI release. This source override is not included in wheel
+# metadata; published artifacts require the distribution by name.
+[tool.uv.sources]
+localmcplib = { path = "../localmcplib" }
+
+[tool.uv.build-backend]
+module-name = "pr_council"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["src/pr_council"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.format]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.8",
+]

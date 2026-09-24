@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "pr-council-mcp": {
+      "command": "uv",
+      "args": [
+        "run",
+        "python",
+        "-m",
+        "pr_council.server"
+      ],
+      "env": {
+        "LOCALMCP_LANGFUSE_ENABLED": "${LOCALMCP_LANGFUSE_ENABLED:-}",
+        "LOCALMCP_LANGFUSE_CAPTURE_PAYLOADS": "${LOCALMCP_LANGFUSE_CAPTURE_PAYLOADS:-}",
+        "LANGFUSE_BASE_URL": "${LANGFUSE_BASE_URL:-}",
+        "LANGFUSE_PUBLIC_KEY": "${LANGFUSE_PUBLIC_KEY:-}",
+        "LANGFUSE_SECRET_KEY": "${LANGFUSE_SECRET_KEY:-}"
+      }
+    }
+  }
+}

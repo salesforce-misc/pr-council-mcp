@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "pr-council-mcp": {
+      "type": "local",
+      "command": [
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "pr_council.server"
+      ],
+      "environment": {
+        "LOCALMCP_LANGFUSE_ENABLED": "{env:LOCALMCP_LANGFUSE_ENABLED}",
+        "LOCALMCP_LANGFUSE_CAPTURE_PAYLOADS": "{env:LOCALMCP_LANGFUSE_CAPTURE_PAYLOADS}",
+        "LANGFUSE_BASE_URL": "{env:LANGFUSE_BASE_URL}",
+        "LANGFUSE_PUBLIC_KEY": "{env:LANGFUSE_PUBLIC_KEY}",
+        "LANGFUSE_SECRET_KEY": "{env:LANGFUSE_SECRET_KEY}"
+      }
+    }
+  }
+}

@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out pr-council-mcp
+        uses: actions/checkout@v4
+        with:
+          path: pr-council-mcp
+
+      - name: Check out localmcplib
+        uses: actions/checkout@v4
+        with:
+          repository: salesforce-misc/localmcplib
+          ref: ad4e0617711e09f863ed00428241d4b16d78782a
+          path: localmcplib
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+        working-directory: pr-council-mcp
+
+      - name: Build sdist and wheel
+        run: uv build
+        working-directory: pr-council-mcp
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: pr-council-mcp/dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
