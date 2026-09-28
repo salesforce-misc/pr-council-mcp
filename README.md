@@ -12,17 +12,14 @@
 
 *Illustrative, time-compressed replay with a fictional PR. [Open the interactive version and transcript](https://demianbrecht.com/posts/pr-council-a-runnable-experiment-in-agentic-engineering/).*
 
-`pr-council-mcp` is a local MCP server for durable, multi-model pull-request reviews. Quality and security reviewers
-inspect a PR independently, deliberators filter their findings, and an aggregator prepares a single review for human
-approval before anything is published to GitHub.
+`pr-council-mcp` is a playground for agentic engineering end to end. It explores production concerns such as durable
+workflows, model coordination, sandboxed tools, secrets, human approval, and observability in a local environment with
+a small footprint: one stdio MCP server backed by SQLite, without a service stack to deploy.
 
-It is also an experimental playground running on two related tracks:
-
-- **Infrastructure:** using an MCP seam between the conversational client and a durable service, with LangGraph
-  orchestration and recovery, constrained model tooling, macOS sandboxing, approval-gated side effects, and optional
-  Langfuse telemetry.
-- **Product:** exploring whether multi-model, multi-disposition reviews become more useful when independent quality
-  and security findings go through deliberation, reconciliation, and aggregation before reaching a human.
+The concrete application is multi-model review of GitHub pull requests. Independent quality and security reviewers
+inspect a PR, deliberate over their findings, and combine retained issues into a preview. The calling agent shows that
+preview to a human; only after explicit approval does the server publish inline comments and a `COMMENT`-only summary
+to GitHub.
 
 > **Status: early development (alpha).** The design, tool surface, and configuration are still changing and may
 > break between versions. Expect rough edges, and expect the interfaces to evolve as both tracks are explored.
