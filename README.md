@@ -6,6 +6,10 @@
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.12-blue.svg)](https://pypi.org/project/pr-council-mcp/)
 [![License](https://img.shields.io/github/license/salesforce-misc/pr-council-mcp.svg)](https://github.com/salesforce-misc/pr-council-mcp/blob/main/LICENSE.txt)
 
+[![Illustrative terminal replay of the PR Council review lifecycle](assets/pr-council-replay.gif)](https://demianbrecht.com/posts/pr-council-a-runnable-experiment-in-agentic-engineering/)
+
+*Illustrative, time-compressed replay with a fictional PR. [Open the interactive version and transcript](https://demianbrecht.com/posts/pr-council-a-runnable-experiment-in-agentic-engineering/).*
+
 `pr-council-mcp` is a local MCP server for durable, multi-model pull-request reviews. Quality and security reviewers
 inspect a PR independently, deliberators filter their findings, and an aggregator prepares a single review for human
 approval before anything is published to GitHub.
