@@ -1,5 +1,11 @@
 # pr-council-mcp
 
+[![CI](https://github.com/salesforce-misc/pr-council-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/salesforce-misc/pr-council-mcp/actions/workflows/ci.yml)
+[![Coverage](https://salesforce-misc.github.io/pr-council-mcp/coverage.svg)](https://github.com/salesforce-misc/pr-council-mcp/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pr-council-mcp.svg)](https://pypi.org/project/pr-council-mcp/)
+[![Python](https://img.shields.io/badge/Python-%E2%89%A53.12-blue.svg)](https://pypi.org/project/pr-council-mcp/)
+[![License](https://img.shields.io/github/license/salesforce-misc/pr-council-mcp.svg)](https://github.com/salesforce-misc/pr-council-mcp/blob/main/LICENSE.txt)
+
 `pr-council-mcp` is a local MCP server for durable, multi-model pull-request reviews. Quality and security reviewers
 inspect a PR independently, deliberators filter their findings, and an aggregator prepares a single review for human
 approval before anything is published to GitHub.
@@ -152,6 +158,10 @@ uv sync --frozen
 make ci
 uv run python -m pr_council.server
 ```
+
+CI uploads `coverage.xml` as a workflow artifact and publishes the coverage badge from successful `main` runs through
+GitHub Pages. A repository maintainer must set **Settings → Pages → Build and deployment → Source** to **GitHub
+Actions** before the badge becomes available.
 
 The checked-in `.mcp.json` and `opencode.jsonc` use that local environment. Launch Claude Code or opencode from the
 repository root to make the development checkout available as `pr-council-mcp`.
