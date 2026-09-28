@@ -199,6 +199,53 @@ async def test_start_accepts_configured_enterprise_host(monkeypatch, tmp_path):
         await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
 
 
+async def test_recovery_rejects_revoked_host_before_resuming_publication(monkeypatch, tmp_path):
+    state_root = tmp_path / "state"
+    runtime = _runtime(_config(allowed_hosts=["github.com", "github.enterprise.example"]), state_root)
+    await asyncio.wait_for(runtime.start(), timeout=_TIMEOUT)
+    monkeypatch.setattr(runtime, "_spawn", lambda *args, **kwargs: None)
+    try:
+        record = await asyncio.wait_for(
+            runtime.start_operation(
+                pr_url="https://github.enterprise.example/acme/repo/pull/7",
+                context=[],
+                mode=ReviewMode.INITIAL,
+                baseline_operation_id=None,
+                iterations=1,
+            ),
+            timeout=_TIMEOUT,
+        )
+        assert runtime.store is not None
+        await asyncio.wait_for(
+            runtime.store.update(
+                record.id,
+                status=OperationStatus.COMMIT_QUEUED,
+                preview=_preview(),
+                state={"pending_commit": {"action": "commit", "revision": 1, "payload_hash": "payload"}},
+            ),
+            timeout=_TIMEOUT,
+        )
+    finally:
+        await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
+
+    recovered = _runtime(_config(), state_root)
+    spawned = []
+    monkeypatch.setattr(recovered, "_spawn", lambda *args, **kwargs: spawned.append((args, kwargs)))
+    await asyncio.wait_for(recovered.start(), timeout=_TIMEOUT)
+    try:
+        assert spawned == []
+        assert recovered.store is not None
+        updated = await asyncio.wait_for(recovered.store.get(record.id), timeout=_TIMEOUT)
+        assert updated is not None
+        assert updated.status == OperationStatus.FAILED
+        assert updated.error == "PR host is no longer allowed by server configuration"
+        assert "pending_commit" not in updated.state
+        with pytest.raises(ReviewError, match="cannot be committed from status failed"):
+            await asyncio.wait_for(recovered.commit(record.id, 1, "payload"), timeout=_TIMEOUT)
+    finally:
+        await asyncio.wait_for(recovered.close(), timeout=_TIMEOUT)
+
+
 async def test_start_snapshots_local_source_beneath_working_directory(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     repository = workspace / "repo"

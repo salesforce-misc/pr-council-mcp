@@ -135,10 +135,13 @@ PR URLs are accepted from `github.com` by default. To allow a GitHub Enterprise 
 allowed_hosts = ["github.com", "github.enterprise.example"]
 ```
 
+Authenticate `gh` for the additional host with `gh auth login --hostname github.enterprise.example`. For headless
+authentication to a GitHub Enterprise Server host, set `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN` instead;
+`GH_TOKEN` and `GITHUB_TOKEN` apply to `github.com` and `ghe.com` hosts.
+
 Secrets resolve from declared environment aliases first and the shared `localmcp` OS-keyring service second. The
 native backend resolves `openai_api_key` and `anthropic_api_key` as required by the selected models. GitHub
-authentication is owned by `gh`, with `GH_TOKEN` or `GITHUB_TOKEN` available as overrides. Secret values are never
-logged.
+authentication is owned by `gh`, using the host-specific credentials described above. Secret values are never logged.
 
 Structured logs are written only to
 `~/.local/state/localmcp/pr-council-mcp/logs/pr-council-mcp.log` (or beneath `$XDG_STATE_HOME`) because stdout and

@@ -169,6 +169,23 @@ async def test_clone_accepts_configured_enterprise_host(monkeypatch, tmp_path):
     assert calls[2][0] == ref.host
 
 
+async def test_cli_rejects_revoked_host_before_github_requests(monkeypatch):
+    cli = GitHubCli(allowed_hosts=["github.com"])
+    ref = PrRef(host="github.enterprise.example", owner="acme", repo="repo", number=1)
+
+    async def forbidden_run(*args, **kwargs):
+        raise AssertionError("GitHub CLI must not be called for a revoked host")
+
+    monkeypatch.setattr(cli, "_run", forbidden_run)
+
+    with pytest.raises(ReviewError, match="host is not allowed"):
+        await cli.authenticated_user(ref.host)
+    with pytest.raises(ReviewError, match="host is not allowed"):
+        await cli.pr_shas(ref)
+    with pytest.raises(ReviewError, match="host is not allowed"):
+        await cli.post_comment_review(ref, head_sha="a" * 40, summary_body="summary", comments=[])
+
+
 def test_repository_size_scan_fails_closed_when_a_directory_is_unreadable(monkeypatch, tmp_path):
     cli = GitHubCli()
 

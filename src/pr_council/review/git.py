@@ -159,8 +159,9 @@ class GitHubCli:
             raise ReviewError(f"{command} command failed with exit code {process.returncode}")
         return out
 
-    @staticmethod
-    def _env(host: str) -> dict[str, str]:
+    def _env(self, host: str) -> dict[str, str]:
+        if host not in self.allowed_hosts:
+            raise ReviewError("GitHub host is not allowed by server configuration")
         return {**os.environ, "GH_HOST": host, "LC_ALL": "C"}
 
     @staticmethod

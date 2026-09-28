@@ -90,6 +90,21 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
     async def _recover(self) -> None:
         assert self.store is not None
         for record in await self.store.recoverable():
+            if record.status == OperationStatus.CANCEL_REQUESTED:
+                await self._cleanup(record)
+                await self.store.update(record.id, status=OperationStatus.CANCELLED)
+                continue
+            ref_data = record.request.get("ref")
+            host = ref_data.get("host") if isinstance(ref_data, dict) else None
+            if host not in self.git.allowed_hosts:
+                await self._cleanup(record)
+                await self.store.update(
+                    record.id,
+                    status=OperationStatus.FAILED,
+                    state={key: value for key, value in record.state.items() if key != "pending_commit"},
+                    error="PR host is no longer allowed by server configuration",
+                )
+                continue
             if record.request.get("source_mode") == ReviewSourceMode.LOCAL.value:
                 try:
                     self._resolve_local_source_path(record.request.get("local_source_path"))
@@ -98,9 +113,6 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
                     continue
             if record.status == OperationStatus.COMMIT_QUEUED and record.state.get("pending_commit"):
                 self._spawn(record.id, command=Command(resume=record.state["pending_commit"]))
-            elif record.status == OperationStatus.CANCEL_REQUESTED:
-                await self._cleanup(record)
-                await self.store.update(record.id, status=OperationStatus.CANCELLED)
             elif record.status != OperationStatus.READY:
                 self._spawn(record.id, resume=True)
 
