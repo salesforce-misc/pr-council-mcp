@@ -52,6 +52,7 @@ class FakeModelFactory:
 
 def _config(
     *,
+    allowed_hosts: list[str] | None = None,
     quality: list[str] | None = None,
     security: list[str] | None = None,
     deliberation: str | None = None,
@@ -81,6 +82,7 @@ def _config(
         limits_kwargs["concurrent_model_calls"] = concurrent_model_calls
     return Config(
         pr_review=PRReviewConfig(
+            allowed_hosts=allowed_hosts or ["github.com"],
             models=PRReviewModelsConfig(**models_kwargs),
             limits=PRReviewLimitsConfig(**limits_kwargs),
         ),
@@ -171,6 +173,28 @@ async def test_start_snapshots_arbitrary_context_and_auto_followup_inherits_it(m
         )
         assert follow_up.parent_operation_id == first.id
         assert follow_up.request["context"] == first.request["context"]
+    finally:
+        await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
+
+
+async def test_start_accepts_configured_enterprise_host(monkeypatch, tmp_path):
+    runtime = _runtime(_config(allowed_hosts=["github.com", "github.enterprise.example"]), tmp_path / "state")
+    await asyncio.wait_for(runtime.start(), timeout=_TIMEOUT)
+    monkeypatch.setattr(runtime, "_spawn", lambda *args, **kwargs: None)
+    try:
+        assert "github.enterprise.example" in runtime.git.allowed_hosts
+        record = await asyncio.wait_for(
+            runtime.start_operation(
+                pr_url="https://github.enterprise.example/acme/repo/pull/7",
+                context=[],
+                mode=ReviewMode.INITIAL,
+                baseline_operation_id=None,
+                iterations=1,
+            ),
+            timeout=_TIMEOUT,
+        )
+        assert record.repo_key == "github.enterprise.example/acme/repo"
+        assert record.request["ref"]["host"] == "github.enterprise.example"
     finally:
         await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
 

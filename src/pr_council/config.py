@@ -11,6 +11,8 @@ from pr_council.errors import PrCouncilError
 
 SERVER_NAME = "pr-council-mcp"
 _MODEL_ID = re.compile(r"^[A-Za-z0-9._:/-]+$")
+_HOSTNAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
+DEFAULT_ALLOWED_HOSTS = ("github.com",)
 
 
 class ConfigError(PrCouncilError):
@@ -74,8 +76,17 @@ class PRReviewModelsConfig(BaseModel):
 class PRReviewConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS), min_length=1, max_length=20)
     models: PRReviewModelsConfig = Field(default_factory=PRReviewModelsConfig)
     limits: PRReviewLimitsConfig = Field(default_factory=PRReviewLimitsConfig)
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _check_allowed_hosts(cls, value: list[str]) -> list[str]:
+        hosts = [host.lower() for host in value]
+        if any(len(host) > 253 or not _HOSTNAME.fullmatch(host) for host in hosts):
+            raise ValueError("allowed_hosts must contain valid hostnames without schemes, ports, or paths")
+        return list(dict.fromkeys(hosts))
 
 
 class Config(BaseModel):

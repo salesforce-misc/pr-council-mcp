@@ -62,7 +62,10 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
             raise ReviewError("could not resolve the local-source sandbox root") from exc
         if not self.local_source_root.is_dir():
             raise ReviewError("local-source sandbox root is not a directory")
-        self.git = GitHubCli(max_repository_bytes=config.pr_review.limits.repository_size_mib * 1024 * 1024)
+        self.git = GitHubCli(
+            max_repository_bytes=config.pr_review.limits.repository_size_mib * 1024 * 1024,
+            allowed_hosts=config.pr_review.allowed_hosts,
+        )
         self.lock = RepoLock(self.root / "locks")
 
     async def _open_store(self) -> OperationStore:
@@ -178,7 +181,7 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
         aggregation_model: str | None = None,
     ) -> OperationRecord:
         store = self._require_store()
-        ref = parse_pr_url(pr_url)
+        ref = parse_pr_url(pr_url, allowed_hosts=self.config.pr_review.allowed_hosts)
         try:
             source_mode = ReviewSourceMode(source_mode)
         except ValueError as exc:

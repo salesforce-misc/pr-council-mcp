@@ -128,6 +128,13 @@ Configuration lives at `~/.config/localmcp/localmcp.toml`, or beneath `$XDG_CONF
 are inherited by every local MCP server and `[server.pr-council-mcp]` overrides this server's application settings.
 Unknown application keys are rejected. The generated configuration uses the default reviewer matrix.
 
+PR URLs are accepted from `github.com` by default. To allow a GitHub Enterprise host, configure:
+
+```toml
+[server.pr-council-mcp.pr_review]
+allowed_hosts = ["github.com", "github.enterprise.example"]
+```
+
 Secrets resolve from declared environment aliases first and the shared `localmcp` OS-keyring service second. The
 native backend resolves `openai_api_key` and `anthropic_api_key` as required by the selected models. GitHub
 authentication is owned by `gh`, with `GH_TOKEN` or `GITHUB_TOKEN` available as overrides. Secret values are never
