@@ -97,27 +97,6 @@ Add `opencode.jsonc`:
 }
 ```
 
-### Example session
-
-The client owns the conversation and handles the operation ID, polling, and preview details. A typical terminal
-session looks like this (output is illustrative):
-
-```text
-$ claude
-> Use pr-council-mcp to review https://github.com/acme/widgets/pull/123.
-  Focus on authorization boundaries and regressions. Show me the review before publishing it.
-
-The council review is ready. It found two issues:
-1. High: a new update path does not enforce repository membership.
-2. Medium: retries can create duplicate audit records.
-
-I have the revision-bound publication preview. Nothing has been published.
-
-> Publish that review.
-
-Published the approved inline comments and COMMENT-only summary to PR #123.
-```
-
 ## How it works
 
 Reviews are checkpointed operations rather than one long MCP request. The client starts a review, polls it, presents
@@ -159,26 +138,6 @@ Structured logs are written only to
 `~/.local/state/localmcp/pr-council-mcp/logs/pr-council-mcp.log` (or beneath `$XDG_STATE_HOME`) because stdout and
 stderr carry the MCP protocol. Langfuse tracing is optional and enabled with `LOCALMCP_LANGFUSE_ENABLED=true`.
 Tool inputs and outputs remain suppressed unless `LOCALMCP_LANGFUSE_CAPTURE_PAYLOADS=true` is also set.
-
-## Development
-
-Clone [localmcplib](https://github.com/salesforce-misc/localmcplib) beside this repository, then run:
-
-```bash
-uv sync --frozen
-make ci
-uv run python -m pr_council.server
-```
-
-CI uploads `coverage.xml` as a workflow artifact and publishes the coverage badge from successful `main` runs through
-GitHub Pages. A repository maintainer must set **Settings → Pages → Build and deployment → Source** to **GitHub
-Actions** before the badge becomes available.
-
-The checked-in `.mcp.json` and `opencode.jsonc` use that local environment. Launch Claude Code or opencode from the
-repository root to make the development checkout available as `pr-council-mcp`.
-
-See [AGENTS.md](AGENTS.md) for detailed architecture and implementation contracts. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for contribution guidance.
 
 ## License
 
