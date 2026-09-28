@@ -1,0 +1,7 @@
+# Project-scoped Codex MCP bootstrap. Keep credentials in the environment or
+# the localmcp keyring, never in this tracked file.
+[mcp_servers.pr-council-mcp]
+command = "uv"
+args = ["run", "python", "-m", "pr_council.server"]
+required = true
+startup_timeout_sec = 60

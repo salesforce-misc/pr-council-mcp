@@ -8,8 +8,8 @@ from pr_council.config import ConfigError, PRReviewLimitsConfig, PRReviewModelsC
 def test_empty_application_config_uses_defaults() -> None:
     config = parse_config(ServerConfig(name="pr-council-mcp", values={}))
 
-    assert config.pr_review.models.quality == ["claude-opus-4-8", "gpt-5.6", "gemini-3.1-pro-preview"]
-    assert config.pr_review.models.security == ["claude-opus-4-8", "gpt-5.6", "gemini-3.1-pro-preview"]
+    assert config.pr_review.models.quality == ["claude-opus-4-8", "gpt-5.6"]
+    assert config.pr_review.models.security == ["claude-opus-4-8", "gpt-5.6"]
 
 
 def test_parse_config_accepts_application_only_server_config() -> None:

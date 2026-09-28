@@ -9,14 +9,19 @@ from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
 
+import localmcp
+import localmcp.server as localmcp_server
 import pytest
 from fastmcp import Client, FastMCP
+from localmcp.config import LocalMCPPaths
+from localmcp.secrets import SecretResolver
 
 import pr_council.server as server
 import pr_council.tools.review as review_tool
 from pr_council.config import Config
 from pr_council.review.models import OperationStatus
 from pr_council.tools import TOOLS
+from pr_council.workflows.review.runtime import ReviewRuntime
 
 _AWAIT_TIMEOUT = 5.0
 
@@ -95,9 +100,81 @@ quality = ["gpt-5.6"]
     assert set(config.model_dump()) == {"pr_review"}
 
 
+def test_missing_config_creates_private_native_base_document(tmp_path: Path) -> None:
+    env = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+    path = LocalMCPPaths.from_environment(env, home=tmp_path).config_file
+
+    config = server.server.load_config(env=env, home=tmp_path)
+
+    assert isinstance(config, Config)
+    assert path.read_text(encoding="utf-8") == (
+        'schema_version = 1\n\n[llm]\nbackend = "native"\n\n'
+        '[secrets.openai_api_key]\nenv_vars = ["OPENAI_API_KEY"]\n\n'
+        '[secrets.anthropic_api_key]\nenv_vars = ["ANTHROPIC_API_KEY"]\n'
+    )
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_existing_shared_config_is_not_rewritten(tmp_path: Path) -> None:
+    env = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+    path = LocalMCPPaths.from_environment(env, home=tmp_path).config_file
+    path.parent.mkdir(parents=True)
+    original = b"schema_version = 1\n[llm]\nbackend = 'native'\n# keep this comment\n"
+    path.write_bytes(original)
+
+    server.server.load_config(env=env, home=tmp_path)
+
+    assert path.read_bytes() == original
+
+
+async def test_start_reports_missing_provider_key_and_accepts_configured_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(
+        localmcp_server,
+        "SecretResolver",
+        lambda env, *, tolerate_keyring_errors: SecretResolver(env, keyring_getter=lambda _service, _account: None),
+    )
+    monkeypatch.setattr(ReviewRuntime, "_spawn", lambda self, *args, **kwargs: None)
+
+    async with Client(server.server.mcp) as client:
+        missing = await asyncio.wait_for(
+            client.call_tool("pr_council_start", {"pr_url": "https://github.com/o/r/pull/1"}, raise_on_error=False),
+            _AWAIT_TIMEOUT,
+        )
+        assert missing.is_error
+        message = str(missing.content)
+        assert 'anthropic API key for model "claude-opus-4-8" is missing' in message
+        assert "ANTHROPIC_API_KEY" in message
+        assert 'account "anthropic_api_key" in the "localmcp" OS keyring service' in message
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+        missing_openai = await asyncio.wait_for(
+            client.call_tool("pr_council_start", {"pr_url": "https://github.com/o/r/pull/1"}, raise_on_error=False),
+            _AWAIT_TIMEOUT,
+        )
+        assert missing_openai.is_error
+        assert "OPENAI_API_KEY" in str(missing_openai.content)
+        assert "test-anthropic-key" not in str(missing_openai.content)
+
+        monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+        started = await asyncio.wait_for(
+            client.call_tool("pr_council_start", {"pr_url": "https://github.com/o/r/pull/1"}),
+            _AWAIT_TIMEOUT,
+        )
+        assert started.data["status"] == "queued"
+        assert "test-openai-key" not in str(started.content)
+        assert "test-anthropic-key" not in str(started.content)
+
+
 def test_main_delegates_to_localmcp(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[object] = []
-    monkeypatch.setattr(server.localmcp, "main", calls.append)
+    monkeypatch.setattr(localmcp, "main", calls.append)
 
     server.main()
 

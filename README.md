@@ -26,8 +26,9 @@ gh auth login
 gh auth status
 ```
 
-Create `~/.config/localmcp/localmcp.toml` and select native model providers. The `llm`, `secrets`, and
-`observability` tables are owned by localmcplib; pr-council owns only its `pr_review` table:
+On first launch, the server creates `~/.config/localmcp/localmcp.toml` (or the path beneath `$XDG_CONFIG_HOME`) with
+this base configuration if the file does not exist. The `llm`, `secrets`, and `observability` tables are owned by
+localmcplib; pr-council owns only its optional `pr_review` table:
 
 ```toml
 schema_version = 1
@@ -40,17 +41,11 @@ env_vars = ["OPENAI_API_KEY"]
 
 [secrets.anthropic_api_key]
 env_vars = ["ANTHROPIC_API_KEY"]
-
-[server.pr-council-mcp.pr_review.models]
-quality = ["claude-opus-4-8", "gpt-5.6"]
-security = ["claude-opus-4-8", "gpt-5.6"]
-deliberation = "claude-opus-4-8"
-aggregation = "claude-haiku-4-5-20251001"
 ```
 
 Set `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY` for the providers used by your selected models. Native secrets may
 instead be stored in the shared `localmcp` keyring service under the `openai_api_key` and `anthropic_api_key`
-accounts.
+accounts. The server starts without these keys and reports missing credentials when a review is requested.
 
 Install the package on demand from public PyPI in your MCP client configuration.
 
@@ -136,7 +131,7 @@ Inspect the MCP server's tool schema for complete arguments and return models.
 
 Configuration lives at `~/.config/localmcp/localmcp.toml`, or beneath `$XDG_CONFIG_HOME` when set. Shared root values
 are inherited by every local MCP server and `[server.pr-council-mcp]` overrides this server's application settings.
-Unknown application keys are rejected. The quickstart configuration uses the default reviewer matrix.
+Unknown application keys are rejected. The generated configuration uses the default reviewer matrix.
 
 Secrets resolve from declared environment aliases first and the shared `localmcp` OS-keyring service second. The
 native backend resolves `openai_api_key` and `anthropic_api_key` as required by the selected models. GitHub

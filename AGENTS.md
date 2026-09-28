@@ -63,6 +63,8 @@ The current modules are organized as follows:
   middleware. It is not exposed as an MCP diagnostic tool.
 - **`pr_council/server.py`** — a thin `localmcp.STDIOServer` declaration. `localmcp.server` owns config/secret/model
   composition, the process-global runtime, FastMCP registration, lifespan, logging, telemetry, and stdio serving.
+- **`pr_council/server_setup.py`** — this application's first-run shared config template and selected-model credential
+  checks at review start.
 
 ## Agent interaction design
 
@@ -186,6 +188,9 @@ disposition to assess every prior finding before publication.
 
 - Config file: `~/.config/localmcp/localmcp.toml`, or `$XDG_CONFIG_HOME/localmcp/localmcp.toml` when
   `XDG_CONFIG_HOME` is an absolute path.
+- If the file is absent, startup creates a native-backend base document with `OPENAI_API_KEY` and
+  `ANTHROPIC_API_KEY` secret aliases. Missing credential values do not prevent startup; starting a review reports
+  which selected model needs a key and how to provide it.
 - State root: `~/.local/state/localmcp/pr-council-mcp`, or beneath an absolute `$XDG_STATE_HOME`.
 - `schema_version`, `[observability]`, `[llm]`, and `[secrets]` are shared. Application-specific `[pr_review]`
   configuration should live beneath `[server.pr-council-mcp]`.

@@ -6,9 +6,10 @@ import localmcp
 
 import pr_council.tools as tools
 from pr_council.config import SERVER_NAME, parse_config
+from pr_council.server_setup import PrCouncilServer
 from pr_council.workflows.review.runtime import ReviewRuntime
 
-server = localmcp.STDIOServer(
+server = PrCouncilServer(
     name=SERVER_NAME,
     tools=tools.TOOLS,
     config_parser=parse_config,

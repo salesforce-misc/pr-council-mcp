@@ -43,12 +43,12 @@ class PRReviewModelsConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     quality: list[str] = Field(
-        default_factory=lambda: ["claude-opus-4-8", "gpt-5.6", "gemini-3.1-pro-preview"],
+        default_factory=lambda: ["claude-opus-4-8", "gpt-5.6"],
         min_length=1,
         max_length=10,
     )
     security: list[str] = Field(
-        default_factory=lambda: ["claude-opus-4-8", "gpt-5.6", "gemini-3.1-pro-preview"],
+        default_factory=lambda: ["claude-opus-4-8", "gpt-5.6"],
         min_length=1,
         max_length=10,
     )

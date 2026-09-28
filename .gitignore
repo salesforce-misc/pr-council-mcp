@@ -11,6 +11,5 @@ coverage.xml
 htmlcov/
 
 # Machine-local client configuration; may contain credentials.
-.codex/config.toml
 .claude/settings.local.json
 .cursor/
