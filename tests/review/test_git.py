@@ -45,6 +45,9 @@ def test_parse_pr_url_honors_caller_supplied_allowed_hosts():
     ref = parse_pr_url("https://example.test/o/r/pull/3", allowed_hosts={"example.test"})
     assert ref == PrRef(host="example.test", owner="o", repo="r", number=3)
 
+    with pytest.raises(ReviewError, match="allowed GitHub host"):
+        parse_pr_url("https://github.com/o/r/pull/3", allowed_hosts=set())
+
 
 @pytest.mark.parametrize(
     "value",
@@ -132,6 +135,55 @@ async def test_clone_rejects_repository_metadata_over_the_size_limit(monkeypatch
     with pytest.raises(ReviewError, match="repository exceeds"):
         await cli.clone_or_fetch(PrRef(host="github.com", owner="acme", repo="large", number=1), tmp_path)
     assert commands == []
+
+
+async def test_clone_accepts_configured_enterprise_host(monkeypatch, tmp_path):
+    cli = GitHubCli(allowed_hosts=["github.com", "github.enterprise.example"])
+    ref = PrRef(host="github.enterprise.example", owner="acme", repo="repo", number=1)
+    calls = []
+
+    async def metadata(*args):
+        calls.append(args)
+        return {"size": 0}
+
+    async def clone(*args):
+        calls.append(args)
+        return tmp_path / "repo"
+
+    monkeypatch.setattr(cli, "_api_json", metadata)
+    monkeypatch.setattr(cli, "_clone_or_fetch_repository", clone)
+
+    assert await cli.clone_or_fetch(ref, tmp_path) == tmp_path / "repo"
+    assert calls[0][0] == ref
+
+    with pytest.raises(ReviewError, match="invalid or unsupported segment"):
+        await cli.clone_or_fetch(PrRef(host="other.example", owner="acme", repo="repo", number=1), tmp_path)
+    assert len(calls) == 2
+
+    async def metadata_for_host(*args):
+        calls.append(args)
+        return {"size": 0}
+
+    monkeypatch.setattr(cli, "_api_json_for_host", metadata_for_host)
+    assert await cli.clone_or_fetch_repository(ref.host, ref.owner, ref.repo, tmp_path) == tmp_path / "repo"
+    assert calls[2][0] == ref.host
+
+
+async def test_cli_rejects_revoked_host_before_github_requests(monkeypatch):
+    cli = GitHubCli(allowed_hosts=["github.com"])
+    ref = PrRef(host="github.enterprise.example", owner="acme", repo="repo", number=1)
+
+    async def forbidden_run(*args, **kwargs):
+        raise AssertionError("GitHub CLI must not be called for a revoked host")
+
+    monkeypatch.setattr(cli, "_run", forbidden_run)
+
+    with pytest.raises(ReviewError, match="host is not allowed"):
+        await cli.authenticated_user(ref.host)
+    with pytest.raises(ReviewError, match="host is not allowed"):
+        await cli.pr_shas(ref)
+    with pytest.raises(ReviewError, match="host is not allowed"):
+        await cli.post_comment_review(ref, head_sha="a" * 40, summary_body="summary", comments=[])
 
 
 def test_repository_size_scan_fails_closed_when_a_directory_is_unreadable(monkeypatch, tmp_path):

@@ -8,16 +8,17 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from pr_council.config import DEFAULT_ALLOWED_HOSTS
 from pr_council.review.models import PreviewComment, PrRef, ReviewError
 
 _SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 _OBJECT_ID = re.compile(r"^[0-9a-fA-F]{40}$")
-_ALLOWED_HOSTS = {"github.com"}
 _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _COMMAND_TIMEOUT_SECONDS = 300.0
 _MAX_LOCAL_SANDBOX_EXCLUSIONS = 4_096
@@ -60,12 +61,13 @@ class LocalSourceSnapshot:
     excluded_paths: tuple[Path, ...]
 
 
-def parse_pr_url(value: str, *, allowed_hosts: set[str] | None = None) -> PrRef:
+def parse_pr_url(value: str, *, allowed_hosts: Collection[str] = DEFAULT_ALLOWED_HOSTS) -> PrRef:
     parsed = urlparse(value.strip())
-    hosts = allowed_hosts or _ALLOWED_HOSTS
+    host = parsed.hostname
     if (
         parsed.scheme != "https"
-        or parsed.hostname not in hosts
+        or host is None
+        or host not in allowed_hosts
         or parsed.port is not None
         or parsed.query
         or parsed.fragment
@@ -75,9 +77,9 @@ def parse_pr_url(value: str, *, allowed_hosts: set[str] | None = None) -> PrRef:
     if len(parts) != 4 or parts[2] != "pull" or not parts[3].isdigit():
         raise ReviewError("PR URL must have the form https://host/owner/repo/pull/number")
     owner, repo = parts[0], parts[1]
-    if any(part in {".", ".."} or not _SEGMENT.fullmatch(part) for part in (parsed.hostname, owner, repo)):
+    if any(part in {".", ".."} or not _SEGMENT.fullmatch(part) for part in (host, owner, repo)):
         raise ReviewError("PR URL contains an invalid repository segment")
-    return PrRef(host=parsed.hostname, owner=owner, repo=repo, number=int(parts[3]))
+    return PrRef(host=host, owner=owner, repo=repo, number=int(parts[3]))
 
 
 class GitHubCli:
@@ -87,10 +89,12 @@ class GitHubCli:
         max_output_bytes: int = _MAX_OUTPUT_BYTES,
         command_timeout_seconds: float = _COMMAND_TIMEOUT_SECONDS,
         max_repository_bytes: int = 5 * 1024 * 1024 * 1024,
+        allowed_hosts: Collection[str] = DEFAULT_ALLOWED_HOSTS,
     ):
         self.max_output_bytes = max_output_bytes
         self.command_timeout_seconds = command_timeout_seconds
         self.max_repository_bytes = max_repository_bytes
+        self.allowed_hosts = frozenset(allowed_hosts)
 
     async def _communicate(self, process: asyncio.subprocess.Process, command: str) -> tuple[bytes, bytes]:
         total_bytes = 0
@@ -155,8 +159,9 @@ class GitHubCli:
             raise ReviewError(f"{command} command failed with exit code {process.returncode}")
         return out
 
-    @staticmethod
-    def _env(host: str) -> dict[str, str]:
+    def _env(self, host: str) -> dict[str, str]:
+        if host not in self.allowed_hosts:
+            raise ReviewError("GitHub host is not allowed by server configuration")
         return {**os.environ, "GH_HOST": host, "LC_ALL": "C"}
 
     @staticmethod
@@ -181,16 +186,20 @@ class GitHubCli:
         return (await self._run("gh", ["api", "user", "--jq", ".login"], env=self._env(host))).strip()
 
     async def clone_or_fetch(self, ref: PrRef, base_dir: Path) -> Path:
+        self._validate_repository(ref.host, ref.owner, ref.repo)
         metadata = await self._api_json(ref, f"repos/{ref.owner}/{ref.repo}")
         return await self._clone_or_fetch_repository(ref.host, ref.owner, ref.repo, base_dir, metadata)
 
     async def clone_or_fetch_repository(self, host: str, owner: str, repo: str, base_dir: Path) -> Path:
-        if host not in _ALLOWED_HOSTS or any(
+        self._validate_repository(host, owner, repo)
+        metadata = await self._api_json_for_host(host, f"repos/{owner}/{repo}")
+        return await self._clone_or_fetch_repository(host, owner, repo, base_dir, metadata)
+
+    def _validate_repository(self, host: str, owner: str, repo: str) -> None:
+        if host not in self.allowed_hosts or any(
             part in {".", ".."} or not _SEGMENT.fullmatch(part) for part in (host, owner, repo)
         ):
             raise ReviewError("repository contains an invalid or unsupported segment")
-        metadata = await self._api_json_for_host(host, f"repos/{owner}/{repo}")
-        return await self._clone_or_fetch_repository(host, owner, repo, base_dir, metadata)
 
     async def _clone_or_fetch_repository(self, host: str, owner: str, repo: str, base_dir: Path, metadata: Any) -> Path:
         repo_path = base_dir / host / owner / repo

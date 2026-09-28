@@ -10,6 +10,24 @@ def test_empty_application_config_uses_defaults() -> None:
 
     assert config.pr_review.models.quality == ["claude-opus-4-8", "gpt-5.6"]
     assert config.pr_review.models.security == ["claude-opus-4-8", "gpt-5.6"]
+    assert config.pr_review.allowed_hosts == ["github.com"]
+
+
+def test_parse_config_accepts_enterprise_github_host() -> None:
+    config = parse_config(
+        ServerConfig(
+            name="pr-council-mcp",
+            values={"pr_review": {"allowed_hosts": ["github.com", "github.enterprise.example"]}},
+        )
+    )
+
+    assert config.pr_review.allowed_hosts == ["github.com", "github.enterprise.example"]
+
+
+@pytest.mark.parametrize("host", ["https://example.com", "example.com:443", "example.com/path", "bad..host"])
+def test_parse_config_rejects_invalid_allowed_host(host: str) -> None:
+    with pytest.raises(ConfigError, match="allowed_hosts must contain valid hostnames"):
+        parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"allowed_hosts": [host]}}))
 
 
 def test_parse_config_accepts_application_only_server_config() -> None:
