@@ -6,6 +6,8 @@
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.12-blue.svg)](https://pypi.org/project/pr-council-mcp/)
 [![License](https://img.shields.io/github/license/salesforce-misc/pr-council-mcp.svg)](https://github.com/salesforce-misc/pr-council-mcp/blob/main/LICENSE.txt)
 
+> **Platform support:** macOS only for now. [Why Linux support is pending](https://demianbrecht.com/posts/pr-council-a-runnable-experiment-in-agentic-engineering/#sandboxing-currently-macos-only).
+
 [![Illustrative terminal replay of the PR Council review lifecycle](assets/pr-council-replay.gif)](https://demianbrecht.com/posts/pr-council-a-runnable-experiment-in-agentic-engineering/)
 
 *Illustrative, time-compressed replay with a fictional PR. [Open the interactive version and transcript](https://demianbrecht.com/posts/pr-council-a-runnable-experiment-in-agentic-engineering/).*
