@@ -49,9 +49,16 @@ env_vars = ["OPENAI_API_KEY"]
 env_vars = ["ANTHROPIC_API_KEY"]
 ```
 
-Set `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY` for the providers used by your selected models. Native secrets may
-instead be stored in the shared `localmcp` keyring service under the `openai_api_key` and `anthropic_api_key`
-accounts. The server starts without these keys and reports missing credentials when a review is requested.
+On macOS, store the keys in your default Keychain. Each command prompts for the key without putting it in shell
+history:
+
+```sh
+security add-generic-password -U -s localmcp -a openai_api_key -w
+security add-generic-password -U -s localmcp -a anthropic_api_key -w
+```
+
+Only the providers used by your selected models need keys. macOS may ask you to allow the server to read these Keychain
+items. The server starts without keys and reports missing credentials when a review is requested.
 
 Install the package on demand from public PyPI in your MCP client configuration.
 
