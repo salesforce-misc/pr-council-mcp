@@ -20,7 +20,7 @@ dependencies = [
     "fastmcp>=4.0.5",
     "langchain>=1.4.2,<2",
     "langchain-core>=1.6.4",
-    "localmcplib[sandbox,server,workflows]>=0.1.4",
+    "localmcplib==0.2.0",
     "pydantic>=2.13.5",
 ]
 
@@ -28,9 +28,6 @@ dependencies = [
 Homepage = "https://github.com/salesforce-misc/pr-council-mcp"
 Repository = "https://github.com/salesforce-misc/pr-council-mcp"
 Issues = "https://github.com/salesforce-misc/pr-council-mcp/issues"
-
-[project.optional-dependencies]
-langfuse = ["localmcplib[telemetry]>=0.1.4"]
 
 [project.scripts]
 pr-council-mcp = "pr_council.server:main"

@@ -15,8 +15,10 @@ class FakeStructuredModel:
         self.calls = 0
         self.configs = []
         self.messages = []
+        self.structured_output_kwargs = {}
 
     def with_structured_output(self, *args, **kwargs):
+        self.structured_output_kwargs = kwargs
         return self
 
     async def ainvoke(self, messages, config=None):
@@ -49,6 +51,7 @@ async def test_aggregation_retries_malformed_structured_output():
     )
 
     assert candidate.summary == "Brief outcome."
+    assert model.structured_output_kwargs == {"method": "json_schema", "include_raw": True}
     assert model.calls == 3
     assert usage.complete is False
     assert model.configs == [{"run_name": "pr-review-aggregator", "callbacks": [langfuse_callback]}] * 3

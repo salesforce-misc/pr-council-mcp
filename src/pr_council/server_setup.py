@@ -10,7 +10,6 @@ from pathlib import Path
 import localmcp
 from localmcp.config import LocalMCPPaths
 from localmcp.llm import (
-    DEFAULT_MODEL_REGISTRY,
     ConfiguredModelFactory,
     LLMBackendConfig,
     ModelConfigurationError,
@@ -77,7 +76,7 @@ class _CredentialCheckedModelFactory(ConfiguredModelFactory):
         self._llm_secret_name = llm_secret_name
 
     def validate(self, model_id: str, *, reasoning_effort: str | None = None) -> ModelSpec:
-        spec = DEFAULT_MODEL_REGISTRY.resolve(model_id)
+        spec = self._checked_delegate.registry.resolve(model_id)
         if self.config.backend == "native":
             if spec.native_provider is None:
                 return self._checked_delegate.validate(model_id, reasoning_effort=reasoning_effort)

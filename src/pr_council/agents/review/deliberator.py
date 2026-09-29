@@ -6,12 +6,13 @@ import json
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain.agents.structured_output import ToolStrategy
+from langchain.agents.structured_output import ProviderStrategy
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
 from localmcp.sandbox import SandboxProfile
 from localmcp.sandbox.seatbelt import sandbox_tools
+from localmcp.structured_output import FencedJSONOutputMiddleware
 from pydantic import BaseModel, Field
 
 from pr_council.agents.review.common import (
@@ -62,7 +63,9 @@ async def deliberate(
             f"You have at most {tool_budget.max_calls} source-tool calls in this pass. "
             "Every tool result reports the remaining budget. Return your structured response before it is exhausted."
         ),
-        response_format=ToolStrategy(DeliberationCandidate),
+        # Native JSON-schema output: ToolStrategy forces tool_choice, which some models reject.
+        response_format=ProviderStrategy(DeliberationCandidate),
+        middleware=[FencedJSONOutputMiddleware(DeliberationCandidate)],
         name=f"pr-review-deliberate-{disposition}",
     )
     callbacks: list[Any] = [usage_callback]

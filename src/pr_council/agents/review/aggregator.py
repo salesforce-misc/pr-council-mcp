@@ -38,7 +38,7 @@ async def aggregate(
     usage: Usage | None = None,
     langfuse_callback: Any | None = None,
 ) -> tuple[AggregationCandidate, Usage]:
-    structured = model.with_structured_output(AggregationCandidate, include_raw=True)
+    structured = model.with_structured_output(AggregationCandidate, method="json_schema", include_raw=True)
     required_source_ids = [str(finding["id"]) for finding in findings]
     messages = [
         SystemMessage(content=f"{BASE_SAFETY}\n\n{_AGGREGATION_PROMPT}"),
