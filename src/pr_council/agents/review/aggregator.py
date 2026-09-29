@@ -7,13 +7,18 @@ from collections.abc import Callable
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AnyMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from localmcp.structured_output import SubmitResultError, SubmitResultMiddleware
 
-from pr_council.agents.review.common import BASE_SAFETY, Usage, extract_callback_usage, is_retryable_error
+from pr_council.agents.review.common import (
+    BASE_SAFETY,
+    ResponseUsageCallback,
+    Usage,
+    extract_callback_usage,
+    is_retryable_error,
+)
 from pr_council.review.models import AggregationCandidate, ReviewError
 
 _AGGREGATION_PROMPT = """Aggregate overlapping retained findings and write a minimal top-level PR review summary.
@@ -74,7 +79,7 @@ async def aggregate(
     usage = usage if usage is not None else Usage()
     last_error: object = "structured output was missing"
     for _attempt in range(3):
-        usage_callback = UsageMetadataCallbackHandler()
+        usage_callback = ResponseUsageCallback()
         callbacks: list[Any] = [usage_callback]
         if langfuse_callback is not None:
             callbacks.append(langfuse_callback)

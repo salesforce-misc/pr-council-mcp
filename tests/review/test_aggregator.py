@@ -189,6 +189,38 @@ async def test_aggregation_preserves_usage_when_transient_error_reraises():
     assert usage.output_tokens == 20
 
 
+def _reported(message: AIMessage) -> AIMessage:
+    message.usage_metadata = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
+    message.response_metadata = {"model_name": "fake"}
+    return message
+
+
+async def test_rejected_request_does_not_mark_retried_usage_incomplete():
+    # The caller's rate-limit retry reuses the accumulator; a request rejected before any response must not
+    # leave a later, fully reported attempt marked incomplete.
+    usage = Usage()
+    with pytest.raises(RuntimeError):
+        await _aggregate(_model(_rate_limited()), usage=usage)
+
+    await _aggregate(_model(_reported(_submit(AggregationCandidate(summary="Done.", findings=[])))), usage=usage)
+
+    assert usage.complete is True
+    assert usage.total_tokens == 12
+
+
+async def test_unreported_correction_turn_marks_usage_incomplete():
+    model = _model(
+        AIMessage(content="no"),
+        _reported(_submit(AggregationCandidate(summary="Done.", findings=[]))),
+    )
+
+    _candidate, usage = await _aggregate(model)
+
+    assert len(model.requests) == 2
+    assert usage.total_tokens == 12
+    assert usage.complete is False
+
+
 async def test_aggregation_fails_after_three_attempts():
     model = _model(*(RuntimeError(f"failure {i}") for i in range(3)))
 

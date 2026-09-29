@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
-from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send, interrupt
 from localmcp.llm import ModelFactory
@@ -21,6 +20,7 @@ from localmcp.sandbox import RootAccess, SandboxProfile, SandboxRoot
 
 from pr_council.agents.review.aggregator import aggregate
 from pr_council.agents.review.common import (
+    ResponseUsageCallback,
     ToolBudget,
     Usage,
     call_with_rate_limit_retry,
@@ -197,7 +197,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         job = state["job"]
         iteration = state.get("iteration", 0) + 1
         last_error: Exception | None = None
-        usage_callback = UsageMetadataCallbackHandler()
+        usage_callback = ResponseUsageCallback()
         limits = deps.config.pr_review.limits
         max_attempts = limits.model_max_attempts
         # Intentionally span retries: failed attempts still consume billable tokens,
@@ -634,7 +634,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             if assessment.get("finding_id") in prior_ids
         ]
         model_id = state["request"]["deliberation_model"]
-        usage_callback = UsageMetadataCallbackHandler()
+        usage_callback = ResponseUsageCallback()
         limits = deps.config.pr_review.limits
         failed_tool_calls = 0
 
