@@ -14,9 +14,7 @@ Python version information. Never include credentials, private repository conten
 
 ## Development setup
 
-The project currently supports macOS and Python 3.12. Clone
-[localmcplib](https://github.com/salesforce-misc/localmcplib) beside this repository, then install the locked
-development environment:
+The project currently supports macOS and Python 3.12. Install the locked development environment:
 
 ```bash
 uv sync --frozen
