@@ -96,11 +96,15 @@ class ToolBudget:
 def agent_recursion_limit(
     max_tool_calls: int,
     *,
-    graph_steps_per_tool_call: int = 2,
-    fixed_overhead: int = 10,
+    graph_steps_per_tool_call: int = 3,
+    fixed_overhead: int = 20,
     minimum: int = 60,
 ) -> int:
-    """Leave graph-transition headroom without changing the external-tool budget."""
+    """Leave graph-transition headroom without changing the external-tool budget.
+
+    Each sequential tool call costs a model step, the result-submission hook, and a tools step; the fixed
+    overhead covers the submission middleware's capped correction rounds.
+    """
     return max(minimum, graph_steps_per_tool_call * max_tool_calls + fixed_overhead)
 
 

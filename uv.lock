@@ -1384,7 +1384,7 @@ wheels = [
 
 [[package]]
 name = "localmcplib"
-version = "0.2.0"
+version = "0.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite" },
@@ -1400,9 +1400,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/db/4f/442638282116a122b59ad30e64c1171c4f61274d81c7e44bf696f7af0ca4/localmcplib-0.2.0.tar.gz", hash = "sha256:84286dab76da3a553d59948588082f1bf52ac135430993f99aaaf7c110abebb6", size = 35760, upload-time = "2026-09-29T20:48:02.519Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/07/1640dfad9ecaa45165399fac16b715ed977cd677734ba4233d5e9f08af61/localmcplib-0.2.2.tar.gz", hash = "sha256:4dd3d547797b529e779ece90939a23f475a60800ba5c206616569d8074807f20", size = 38717, upload-time = "2026-09-29T22:33:24.331Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bf/e6/53ef1de5c42adf5ed5c6cf210ea4fb9488ab7949b0aff8546aa1240d0906/localmcplib-0.2.0-py3-none-any.whl", hash = "sha256:7b8de2aa16b306f9523b429cf0ea0e5a99433833884b1db9146f4f7cdab414a3", size = 42595, upload-time = "2026-09-29T20:48:01.188Z" },
+    { url = "https://files.pythonhosted.org/packages/df/81/462b40474cfd009448815e107ae78c4e6d9d31b611796f7d170a0bb7c7f4/localmcplib-0.2.2-py3-none-any.whl", hash = "sha256:21d333bc741b45f8557a508796baecaa1547efe29896ee4508af89324f9820eb", size = 45550, upload-time = "2026-09-29T22:33:22.768Z" },
 ]
 
 [[package]]
@@ -1808,7 +1808,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=4.0.5" },
     { name = "langchain", specifier = ">=1.4.2,<2" },
     { name = "langchain-core", specifier = ">=1.6.4" },
-    { name = "localmcplib", specifier = "==0.2.0" },
+    { name = "localmcplib", specifier = "==0.2.2" },
     { name = "pydantic", specifier = ">=2.13.5" },
 ]
 
