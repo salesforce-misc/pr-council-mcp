@@ -55,7 +55,7 @@ class PRReviewModelsConfig(BaseModel):
         max_length=10,
     )
     deliberation: str = "claude-opus-5-5"
-    aggregation: str = "claude-haiku-4-5-20251001"
+    aggregation: str = "claude-sonnet-5"
 
     @field_validator("quality", "security")
     @classmethod
