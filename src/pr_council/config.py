@@ -45,16 +45,16 @@ class PRReviewModelsConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     quality: list[str] = Field(
-        default_factory=lambda: ["claude-opus-4-8", "gpt-5.6"],
+        default_factory=lambda: ["claude-opus-5-5", "gpt-6"],
         min_length=1,
         max_length=10,
     )
     security: list[str] = Field(
-        default_factory=lambda: ["claude-opus-4-8", "gpt-5.6"],
+        default_factory=lambda: ["claude-opus-5-5", "gpt-6"],
         min_length=1,
         max_length=10,
     )
-    deliberation: str = "claude-opus-4-8"
+    deliberation: str = "claude-opus-5-5"
     aggregation: str = "claude-haiku-4-5-20251001"
 
     @field_validator("quality", "security")

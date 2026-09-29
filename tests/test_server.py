@@ -149,7 +149,7 @@ async def test_start_reports_missing_provider_key_and_accepts_configured_keys(
         )
         assert missing.is_error
         message = str(missing.content)
-        assert 'anthropic API key for model "claude-opus-4-8" is missing' in message
+        assert 'anthropic API key for model "claude-opus-5-5" is missing' in message
         assert "ANTHROPIC_API_KEY" in message
         assert 'account "anthropic_api_key" in the "localmcp" OS keyring service' in message
 
