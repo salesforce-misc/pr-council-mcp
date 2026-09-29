@@ -274,6 +274,10 @@ async def test_aggregation_retries_follow_up_source_id_coverage_failure():
     assert payload["requiredSourceFindingIds"] == ["synthetic-retained-id"]
     retry = model.requests[1]
     assert any(m.type == "ai" and m.tool_calls and m.tool_calls[0]["id"] == "s1" for m in retry)
+    # Providers reject a history with an unanswered tool call, so the carried-forward submission needs its result.
+    called = {call["id"] for m in retry if m.type == "ai" for call in m.tool_calls}
+    answered = {m.tool_call_id for m in retry if m.type == "tool"}
+    assert called <= answered
     correction = _corrections(retry)[0]
     assert correction["requiredSourceFindingIds"] == ["synthetic-retained-id"]
     assert "baseline-id is contextual" in correction["validationError"]
