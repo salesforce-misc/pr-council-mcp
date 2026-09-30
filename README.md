@@ -96,6 +96,15 @@ Add `opencode.jsonc`:
 }
 ```
 
+### Updating
+
+`uvx` reuses a cached environment, so a client restart does not pick up a new release on its own. Clear the cached
+package, then restart your MCP client to install the latest release:
+
+```bash
+uv cache clean pr-council-mcp
+```
+
 ## How it works
 
 Reviews are checkpointed operations rather than one long MCP request. The client starts a review, polls it, presents
