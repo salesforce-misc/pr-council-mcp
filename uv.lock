@@ -1384,35 +1384,25 @@ wheels = [
 
 [[package]]
 name = "localmcplib"
-version = "0.1.4"
+version = "0.2.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/95/bf/63f7f756b2c1557f1d94fc94bfba63c0cd189f15cb30e0fe592be8f57d51/localmcplib-0.1.4.tar.gz", hash = "sha256:edeffee9e82459a58124fc6dd9aeced8c32270c586240f0f97f8d52b22995e42", size = 33840, upload-time = "2026-09-29T00:00:54.997Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bc/79/a9ac5debbd6af316acf3588e00527f7bbfab4e1cbe31f18334ff2e5434bc/localmcplib-0.1.4-py3-none-any.whl", hash = "sha256:42122c328abbaf37d027e4333122bf7b9fe6f6ddfa42c23e66ae6018abcbcfde", size = 40335, upload-time = "2026-09-29T00:00:53.508Z" },
-]
-
-[package.optional-dependencies]
-sandbox = [
-    { name = "langchain-core" },
-    { name = "pydantic" },
-]
-server = [
+dependencies = [
+    { name = "aiosqlite" },
     { name = "fastmcp" },
     { name = "httpx2" },
     { name = "keyring" },
+    { name = "langchain" },
     { name = "langchain-anthropic" },
+    { name = "langchain-core" },
     { name = "langchain-openai" },
-    { name = "structlog" },
-]
-telemetry = [
-    { name = "fastmcp" },
     { name = "langfuse" },
+    { name = "langgraph-checkpoint-sqlite" },
+    { name = "pydantic" },
     { name = "structlog" },
 ]
-workflows = [
-    { name = "aiosqlite" },
-    { name = "langgraph-checkpoint-sqlite" },
-    { name = "structlog" },
+sdist = { url = "https://files.pythonhosted.org/packages/f6/07/1640dfad9ecaa45165399fac16b715ed977cd677734ba4233d5e9f08af61/localmcplib-0.2.2.tar.gz", hash = "sha256:4dd3d547797b529e779ece90939a23f475a60800ba5c206616569d8074807f20", size = 38717, upload-time = "2026-09-29T22:33:24.331Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/81/462b40474cfd009448815e107ae78c4e6d9d31b611796f7d170a0bb7c7f4/localmcplib-0.2.2-py3-none-any.whl", hash = "sha256:21d333bc741b45f8557a508796baecaa1547efe29896ee4508af89324f9820eb", size = 45550, upload-time = "2026-09-29T22:33:22.768Z" },
 ]
 
 [[package]]
@@ -1794,19 +1784,14 @@ wheels = [
 
 [[package]]
 name = "pr-council-mcp"
-version = "0.2.2"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
     { name = "langchain" },
     { name = "langchain-core" },
-    { name = "localmcplib", extra = ["sandbox", "server", "workflows"] },
+    { name = "localmcplib" },
     { name = "pydantic" },
-]
-
-[package.optional-dependencies]
-langfuse = [
-    { name = "localmcplib", extra = ["telemetry"] },
 ]
 
 [package.dev-dependencies]
@@ -1823,11 +1808,9 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=4.0.5" },
     { name = "langchain", specifier = ">=1.4.2,<2" },
     { name = "langchain-core", specifier = ">=1.6.4" },
-    { name = "localmcplib", extras = ["sandbox", "server", "workflows"], specifier = ">=0.1.4" },
-    { name = "localmcplib", extras = ["telemetry"], marker = "extra == 'langfuse'", specifier = ">=0.1.4" },
+    { name = "localmcplib", specifier = "==0.2.2" },
     { name = "pydantic", specifier = ">=2.13.5" },
 ]
-provides-extras = ["langfuse"]
 
 [package.metadata.requires-dev]
 dev = [

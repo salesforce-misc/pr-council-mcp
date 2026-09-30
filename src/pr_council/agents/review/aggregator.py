@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
+from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AnyMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
+from localmcp.structured_output import SubmitResultError, SubmitResultMiddleware
 
-from pr_council.agents.review.common import BASE_SAFETY, Usage, extract_usage, is_retryable_error
+from pr_council.agents.review.common import (
+    BASE_SAFETY,
+    ResponseUsageCallback,
+    Usage,
+    extract_callback_usage,
+    is_retryable_error,
+)
 from pr_council.review.models import AggregationCandidate, ReviewError
 
 _AGGREGATION_PROMPT = """Aggregate overlapping retained findings and write a minimal top-level PR review summary.
@@ -38,10 +47,17 @@ async def aggregate(
     usage: Usage | None = None,
     langfuse_callback: Any | None = None,
 ) -> tuple[AggregationCandidate, Usage]:
-    structured = model.with_structured_output(AggregationCandidate, include_raw=True)
+    # The same unforced submission tool as the reviewers: forced tool_choice and provider-native schemas are
+    # not portable across models and gateways.
+    agent = create_agent(
+        model,
+        [],
+        system_prompt=f"{BASE_SAFETY}\n\n{_AGGREGATION_PROMPT}",
+        middleware=[SubmitResultMiddleware(AggregationCandidate, max_attempts=3)],
+        name="pr-review-aggregator",
+    )
     required_source_ids = [str(finding["id"]) for finding in findings]
-    messages = [
-        SystemMessage(content=f"{BASE_SAFETY}\n\n{_AGGREGATION_PROMPT}"),
+    messages: list[AnyMessage | dict[str, Any]] = [
         HumanMessage(
             content=json.dumps(
                 {
@@ -63,50 +79,40 @@ async def aggregate(
     usage = usage if usage is not None else Usage()
     last_error: object = "structured output was missing"
     for _attempt in range(3):
+        usage_callback = ResponseUsageCallback()
+        callbacks: list[Any] = [usage_callback]
+        if langfuse_callback is not None:
+            callbacks.append(langfuse_callback)
+        config: RunnableConfig = {"run_name": "pr-review-aggregator", "callbacks": callbacks}
+        candidate: AggregationCandidate | None = None
         try:
-            callbacks = [langfuse_callback] if langfuse_callback is not None else []
-            result = await structured.ainvoke(
-                messages,
-                config={"run_name": "pr-review-aggregator", "callbacks": callbacks},
-            )
+            result = await agent.ainvoke({"messages": messages}, config=config)
+        except SubmitResultError as exc:
+            last_error = exc
         except Exception as exc:
             # Transient transport/API faults (429, 5xx, connection, timeout) are not
-            # fixable by the schema-correction retries below: re-raise them so the
-            # caller's call_with_rate_limit_retry applies its reset-aware backoff
-            # instead of burning all three local attempts with no delay.
+            # fixable by the correction retries below: re-raise them so the caller's
+            # call_with_rate_limit_retry applies its reset-aware backoff instead of
+            # burning all three local attempts with no delay.
             if is_retryable_error(exc):
                 raise
             last_error = exc
-            continue
-        result_dict = cast(dict[str, Any], result)
-        raw = result_dict.get("raw")
-        current_usage = extract_usage([raw] if raw is not None else [])
-        usage.input_tokens += current_usage.input_tokens
-        usage.output_tokens += current_usage.output_tokens
-        usage.total_tokens += current_usage.total_tokens
-        usage.tool_calls += current_usage.tool_calls
-        usage.complete = usage.complete and current_usage.complete
-        parsed = result_dict.get("parsed")
-        candidate: AggregationCandidate | None = None
-        if isinstance(parsed, AggregationCandidate):
-            candidate = parsed
-        elif parsed is not None:
-            try:
-                candidate = AggregationCandidate.model_validate(parsed)
-            except ValueError as exc:
-                last_error = exc
         else:
-            last_error = result_dict.get("parsing_error") or last_error
+            candidate = result["structured_response"]
+            # Continue from the submitted result so a validation correction has the prior answer in context.
+            messages = list(result["messages"])
+        finally:
+            _add_usage(usage, extract_callback_usage(usage_callback))
         if candidate is None:
-            # Feed the schema failure back: aggregation runs at temperature 0, so
-            # without a corrective message every retry replays the same malformed
-            # output against identical input and wastes the attempt.
+            # Feed the failure back: aggregation runs at temperature 0, so without a
+            # corrective message every retry replays the same malformed output
+            # against identical input and wastes the attempt.
             messages.append(
                 HumanMessage(
                     content=json.dumps(
                         {
-                            "correction": "The previous response did not match the required schema. "
-                            "Return a corrected AggregationCandidate.",
+                            "correction": "The previous attempt did not submit a valid result. "
+                            "Submit a corrected AggregationCandidate.",
                             "schemaError": str(last_error),
                             "requiredSourceFindingIds": required_source_ids,
                         }
@@ -124,7 +130,7 @@ async def aggregate(
                 HumanMessage(
                     content=json.dumps(
                         {
-                            "correction": "The previous aggregation failed validation. Return a corrected result.",
+                            "correction": "The previous aggregation failed validation. Submit a corrected result.",
                             "validationError": str(exc),
                             "requiredSourceFindingIds": required_source_ids,
                         }
@@ -132,3 +138,11 @@ async def aggregate(
                 )
             )
     raise ReviewError(f"aggregation did not return a valid result after 3 attempts: {last_error}")
+
+
+def _add_usage(total: Usage, current: Usage) -> None:
+    total.input_tokens += current.input_tokens
+    total.output_tokens += current.output_tokens
+    total.total_tokens += current.total_tokens
+    total.tool_calls += current.tool_calls
+    total.complete = total.complete and current.complete

@@ -433,7 +433,7 @@ async def test_start_snapshots_per_operation_model_overrides(monkeypatch, tmp_pa
         await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
 
 
-async def test_start_rejects_unknown_model_before_persisting(monkeypatch, tmp_path):
+async def test_start_accepts_uncatalogued_model(monkeypatch, tmp_path):
     runtime = _runtime(_config(), tmp_path / "state")
     await asyncio.wait_for(runtime.start(), timeout=_TIMEOUT)
     monkeypatch.setattr(runtime, "_spawn", lambda *args, **kwargs: None)
@@ -441,16 +441,15 @@ async def test_start_rejects_unknown_model_before_persisting(monkeypatch, tmp_pa
     create = AsyncMock(wraps=runtime.store.create)
     monkeypatch.setattr(runtime.store, "create", create)
     try:
-        with pytest.raises(ReviewError, match='unknown model id "unknown-model"'):
-            await runtime.start_operation(
-                pr_url="https://github.com/acme/repo/pull/7",
-                context=[],
-                mode=ReviewMode.INITIAL,
-                baseline_operation_id=None,
-                iterations=1,
-                models={"quality": ["unknown-model"], "security": ["gpt-5.6"]},
-            )
-        create.assert_not_awaited()
+        await runtime.start_operation(
+            pr_url="https://github.com/acme/repo/pull/7",
+            context=[],
+            mode=ReviewMode.INITIAL,
+            baseline_operation_id=None,
+            iterations=1,
+            models={"quality": ["claude-opus-9"], "security": ["gpt-5.6"]},
+        )
+        create.assert_awaited_once()
     finally:
         await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
 

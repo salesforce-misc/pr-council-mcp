@@ -1,9 +1,9 @@
 from typing import Any, cast
 
-from langchain.agents.structured_output import ToolStrategy
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from localmcp.sandbox import RootAccess, SandboxProfile, SandboxRoot
+from localmcp.structured_output import SubmitResultMiddleware
 
 import pr_council.agents.review.deliberator as deliberator_module
 import pr_council.agents.review.reviewer as reviewer_module
@@ -12,7 +12,7 @@ from pr_council.agents.review.deliberator import DeliberationCandidate
 from pr_council.agents.review.reviewer import ReviewerAgent
 
 
-def test_reviewer_forces_tool_strategy(monkeypatch, tmp_path):
+def test_reviewer_uses_unforced_submit_tool(monkeypatch, tmp_path):
     captured: dict[str, Any] = {}
 
     def fake_create_agent(*args, **kwargs):
@@ -32,10 +32,11 @@ def test_reviewer_forces_tool_strategy(monkeypatch, tmp_path):
         source_tool_timeout_seconds=30.0,
     )
 
-    assert isinstance(captured["response_format"], ToolStrategy)
+    assert captured.get("response_format") is None
+    assert any(isinstance(m, SubmitResultMiddleware) for m in captured["middleware"])
 
 
-async def test_deliberator_forces_tool_strategy(monkeypatch, tmp_path):
+async def test_deliberator_uses_unforced_submit_tool(monkeypatch, tmp_path):
     captured: dict[str, Any] = {}
 
     class FakeAgent:
@@ -63,4 +64,5 @@ async def test_deliberator_forces_tool_strategy(monkeypatch, tmp_path):
         usage_callback=UsageMetadataCallbackHandler(),
     )
 
-    assert isinstance(captured["response_format"], ToolStrategy)
+    assert captured.get("response_format") is None
+    assert any(isinstance(m, SubmitResultMiddleware) for m in captured["middleware"])

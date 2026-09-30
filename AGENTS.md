@@ -186,14 +186,19 @@ disposition to assess every prior finding before publication.
 
 ## Config and secret contract
 
+`localmcplib` is pinned to an exact version in `pyproject.toml`. It owns the shared config document, secret
+resolution, and model catalog this server builds on, so upgrades are deliberate: bump the pin, re-lock, and adapt this
+repository to any shared config, secret, catalog, or API changes in the same change — including `config.py`,
+`server_setup.py`'s first-run template, tests, and this document.
+
 - Config file: `~/.config/localmcp/localmcp.toml`, or `$XDG_CONFIG_HOME/localmcp/localmcp.toml` when
   `XDG_CONFIG_HOME` is an absolute path.
 - If the file is absent, startup creates a native-backend base document with `OPENAI_API_KEY` and
   `ANTHROPIC_API_KEY` secret aliases. Missing credential values do not prevent startup; starting a review reports
   which selected model needs a key and how to provide it.
 - State root: `~/.local/state/localmcp/pr-council-mcp`, or beneath an absolute `$XDG_STATE_HOME`.
-- `schema_version`, `[observability]`, `[llm]`, and `[secrets]` are shared. Application-specific `[pr_review]`
-  configuration should live beneath `[server.pr-council-mcp]`.
+- `schema_version`, `[observability]`, `[llm]` (including `[llm.models]` capability overrides), and `[secrets]` are
+  shared. Application-specific `[pr_review]` configuration should live beneath `[server.pr-council-mcp]`.
 - Unknown keys in this server's effective application view are rejected with `ConfigError`.
 - `LOCALMCP_LOG_LEVEL` overrides `[observability].log_level`; unset values fall back to the file and invalid
   values degrade to `WARNING`.
@@ -207,8 +212,10 @@ disposition to assess every prior finding before publication.
 `[llm].backend` is explicitly either `openai_compatible` or `native`; it is never inferred from available secrets.
 The compatible backend shares one endpoint and `llm_api_key` across model dialects. The native backend routes each
 model through its registered provider and corresponding personal credential. Switching backends must not require
-changes to `[pr_review.models]`. Model IDs must exist in `localmcp.llm.DEFAULT_MODEL_REGISTRY` before a workflow may
-use them.
+changes to `[pr_review.models]`. The model catalog is advisory: model IDs are resolved through the configured
+factory's registry (the built-in catalog plus shared `[llm.models]` overrides), unlisted IDs use inferred capabilities,
+and the provider remains the authority on whether a model exists. Review start still rejects models the selected
+backend cannot route or whose credential is missing.
 
 `[pr_review.models]` owns the quality/security reviewer lists and the deliberation/aggregation role models. The start
 tool accepts optional per-operation overrides; the runtime validates, deduplicates, bounds, and persists the resolved
@@ -219,7 +226,7 @@ prepared repository size, command timeout, model retries, and retry delays. The 
 persisted so recovery cannot reset it. Every Bash result reports the remaining budget.
 
 Langfuse is optional and environment-configured. It requires `LOCALMCP_LANGFUSE_ENABLED=true`,
-`LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_SECRET_KEY`, plus the optional dependency. Langfuse
+`LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_SECRET_KEY`; the client is always installed. Langfuse
 failures must never change application behavior.
 Tool inputs and outputs are captured only when `LOCALMCP_LANGFUSE_CAPTURE_PAYLOADS=true` is explicitly set.
 

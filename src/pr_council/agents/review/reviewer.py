@@ -7,12 +7,12 @@ import json
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain.agents.structured_output import ToolStrategy
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
 from localmcp.sandbox import SandboxProfile
 from localmcp.sandbox.seatbelt import sandbox_tools
+from localmcp.structured_output import SubmitResultMiddleware
 from pydantic import BaseModel, Field
 
 from pr_council.agents.review.common import (
@@ -76,10 +76,12 @@ class ReviewerAgent:
             system_prompt=(
                 f"{review_safety_prompt(base_sha, head_sha)}\n\n{_DISPOSITION_PROMPTS[disposition]}\n\n"
                 f"You have at most {tool_budget.max_calls} source-tool calls in this pass. "
-                "Every tool result reports the remaining budget. Return your structured response before "
+                "Every tool result reports the remaining budget. Submit your result before "
                 "it is exhausted."
             ),
-            response_format=ToolStrategy(RawIterationCandidate),
+            # Unforced submission tool: ToolStrategy forces tool_choice, which some models reject, and gateways
+            # may drop ProviderStrategy's schema or let a model answer without inspecting the source.
+            middleware=[SubmitResultMiddleware(RawIterationCandidate)],
             name=f"pr-review-{disposition}",
         )
 
