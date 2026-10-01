@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -920,7 +921,7 @@ async def test_bound_git_network_env_keeps_inherited_git_config_entries(monkeypa
 
     assert config("http.proxy") == ["http://proxy.example:3128"]
     assert config("credential.helper")[-1] == "!gh auth git-credential"
-    assert env["GIT_CONFIG_COUNT"] == "5"
+    assert env["GIT_CONFIG_COUNT"] == "6"
 
 
 @pytest.mark.parametrize("account", [None, "mapped-user"])
@@ -954,3 +955,22 @@ async def test_managed_hydration_runs_every_remote_capable_git_command_as_the_bo
     # Presence checks report a missing commit instead of fetching it; the explicit fetch handles that.
     assert all(env["GIT_NO_LAZY_FETCH"] == "1" for env in envs["cat-file"])
     assert "GIT_NO_LAZY_FETCH" not in envs["diff"][0] and "GIT_NO_LAZY_FETCH" not in envs["worktree"][0]
+
+
+async def test_bound_git_refuses_ssh_from_an_inherited_https_to_ssh_rewrite(monkeypatch, tmp_path):
+    global_config = tmp_path / "gitconfig"
+    global_config.write_text('[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n')
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.fspath(global_config))
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/acme/repo.git"], check=True)
+    cli = GitHubCli().bind("github.com", "mapped-user")
+    _token_stub(monkeypatch, cli, [])
+
+    env = await cli._git_network_env()
+    assert env is not None
+    result = subprocess.run(["git", "ls-remote", "origin"], cwd=repo, env=env, capture_output=True, text=True)
+
+    # The inherited rule still turns the HTTPS origin into SSH, but Git must refuse it rather than use an SSH key.
+    assert result.returncode != 0
+    assert "transport 'ssh' not allowed" in result.stderr

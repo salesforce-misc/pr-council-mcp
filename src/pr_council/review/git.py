@@ -219,7 +219,7 @@ class GitHubCli:
 
         Unbound adapters keep the inherited environment and credential setup. Bound
         adapters rewrite SSH remotes to HTTPS and use only gh's credential helper,
-        so fetches authenticate as the bound account rather than with an SSH key.
+        so fetches authenticate as the bound account; SSH is disallowed so nothing falls back to an SSH key.
         """
         if self._account is None or self._bound_host is None:
             return None
@@ -229,6 +229,8 @@ class GitHubCli:
             ("credential.helper", "!gh auth git-credential"),
             (f"url.https://{host}/.insteadOf", f"git@{host}:"),
             (f"url.https://{host}/.insteadOf", f"ssh://git@{host}/"),
+            # An inherited HTTPS-to-SSH rewrite would otherwise authenticate with an SSH key, not the bound account.
+            ("protocol.ssh.allow", "never"),
         ]
         env = {**(await self._env(host)), "GIT_TERMINAL_PROMPT": "0"}
         # Append after inherited GIT_CONFIG_* entries, such as proxy or CA settings, rather than replacing them.
