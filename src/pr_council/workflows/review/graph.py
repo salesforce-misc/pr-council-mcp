@@ -425,8 +425,10 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         await deps.check_cancelled(operation_id)
         ref = PrRef.model_validate(state["ref"])
         source_mode = ReviewSourceMode(state["request"].get("source_mode", ReviewSourceMode.MANAGED.value))
+        github_account = state["request"].get("github_account")
+        git = deps.git.bind(ref.host, github_account)
         async with deps.lock.acquire(ref.repo_key):
-            base_sha, advertised_head = await deps.git.pr_shas(ref)
+            base_sha, advertised_head = await git.pr_shas(ref)
             head_sha = advertised_head
             if source_mode == ReviewSourceMode.LOCAL:
                 raw_local_path = state["request"].get("local_source_path")
@@ -434,7 +436,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                     raise ReviewError("local source operation is missing its repository path")
                 repo_path = Path(raw_local_path)
                 worktree_path = repo_path
-                local_snapshot = await deps.git.validate_local_source(
+                local_snapshot = await git.validate_local_source(
                     repo_path,
                     deps.local_source_root,
                     base_sha=base_sha,
@@ -445,9 +447,9 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                 # This is GitHub's canonical patch solely for later inline-comment
                 # eligibility. Reviewers inspect the validated local base/head
                 # objects directly through their source sandbox.
-                diff = await deps.git.diff(repo_path, ref)
-                confirmed_base, confirmed_head = await deps.git.pr_shas(ref)
-                confirmed_snapshot = await deps.git.validate_local_source(
+                diff = await git.diff(repo_path, ref)
+                confirmed_base, confirmed_head = await git.pr_shas(ref)
+                confirmed_snapshot = await git.validate_local_source(
                     repo_path,
                     deps.local_source_root,
                     base_sha=base_sha,
@@ -462,11 +464,11 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                     raise ReviewError("pull request base or head changed while the review was being prepared")
             else:
                 source_excluded_paths = None
-                repo_path = await deps.git.clone_or_fetch(ref, deps.repos_dir)
-                fetched_head = await deps.git.fetch_head(repo_path, ref.number)
+                repo_path = await git.clone_or_fetch(ref, deps.repos_dir)
+                fetched_head = await git.fetch_head(repo_path, ref.number)
                 if fetched_head != advertised_head:
                     raise ReviewError("pull request head changed while the review was being prepared")
-                await deps.git.materialize_comparison(
+                await git.materialize_comparison(
                     repo_path,
                     base_sha=base_sha,
                     head_sha=head_sha,
@@ -484,25 +486,25 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                             "worktree_path": os.fspath(worktree_path),
                         },
                     )
-                    await deps.git.create_worktree(repo_path, worktree_path, head_sha)
-                    git_metadata_root = deps.git.linked_worktree_metadata_root(
+                    await git.create_worktree(repo_path, worktree_path, head_sha)
+                    git_metadata_root = git.linked_worktree_metadata_root(
                         repo_path,
                         worktree_path,
                         deps.repos_dir,
                     )
-                    diff = await deps.git.diff(repo_path, ref)
-                    confirmed_base, confirmed_head = await deps.git.pr_shas(ref)
-                    confirmed_fetched_head = await deps.git.fetch_head(repo_path, ref.number)
+                    diff = await git.diff(repo_path, ref)
+                    confirmed_base, confirmed_head = await git.pr_shas(ref)
+                    confirmed_fetched_head = await git.fetch_head(repo_path, ref.number)
                     if (confirmed_base, confirmed_head, confirmed_fetched_head) != (base_sha, head_sha, head_sha):
                         raise ReviewError("pull request base or head changed while the review was being prepared")
                 except BaseException:
                     cleanup_failures: list[str] = []
                     try:
-                        await deps.git.remove_worktree(repo_path, worktree_path)
+                        await git.remove_worktree(repo_path, worktree_path)
                     except Exception as exc:
                         cleanup_failures.append(type(exc).__name__)
                     try:
-                        await deps.git.release_comparison(repo_path, operation_id)
+                        await git.release_comparison(repo_path, operation_id)
                     except Exception as exc:
                         cleanup_failures.append(type(exc).__name__)
                     if cleanup_failures:
@@ -512,7 +514,9 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                             error_types=cleanup_failures,
                         )
                     raise
-        login = await deps.git.authenticated_user(ref.host)
+        login = await git.authenticated_user(ref.host)
+        if github_account is not None and login.lower() != github_account.lower():
+            raise ReviewError(f'the token for GitHub account "{github_account}" authenticated as "{login}"')
         timing = {**state.get("timing", {}), "setupMs": int(time.time() * 1000) - began}
         catalog_state = {
             "source_mode": source_mode.value,
@@ -925,16 +929,18 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             raise ReviewError("commit revision or payload hash does not match the preview")
         await deps.store.update(state["operation_id"], status=OperationStatus.COMMITTING)
         ref = PrRef.model_validate(state["ref"])
-        current_user = await deps.git.authenticated_user(ref.host)
+        # Publish as the account the operation was prepared with, even if the mapping has since changed.
+        git = deps.git.bind(ref.host, state["request"].get("github_account"))
+        current_user = await git.authenticated_user(ref.host)
         if current_user != state["owner_login"]:
             raise ReviewError("authenticated GitHub user changed after the review was prepared")
         source_mode = ReviewSourceMode(state.get("source_mode", ReviewSourceMode.MANAGED.value))
         local_source_error: ReviewError | None = None
         async with deps.lock.acquire(ref.repo_key):
-            current_base, current_head = await deps.git.pr_shas(ref)
+            current_base, current_head = await git.pr_shas(ref)
             if source_mode == ReviewSourceMode.LOCAL:
                 try:
-                    snapshot = await deps.git.validate_local_source(
+                    snapshot = await git.validate_local_source(
                         Path(state["worktree_path"]),
                         deps.local_source_root,
                         base_sha=preview.base_sha,
@@ -945,7 +951,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                     local_source_error = exc
                 fetched_head = current_head
             else:
-                fetched_head = await deps.git.fetch_head(Path(state["repo_path"]), ref.number)
+                fetched_head = await git.fetch_head(Path(state["repo_path"]), ref.number)
         if (
             local_source_error is not None
             or fetched_head != current_head
@@ -982,8 +988,8 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             )
             return {"final_status": OperationStatus.STALE.value}
         marker = f'"operationId": "{state["operation_id"]}"'
-        if not await deps.git.review_already_posted(ref, marker, state["owner_login"]):
-            await deps.git.post_comment_review(
+        if not await git.review_already_posted(ref, marker, state["owner_login"]):
+            await git.post_comment_review(
                 ref,
                 head_sha=preview.head_sha,
                 summary_body=preview.summary_body,

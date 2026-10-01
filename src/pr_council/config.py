@@ -12,6 +12,8 @@ from pr_council.errors import PrCouncilError
 SERVER_NAME = "pr-council-mcp"
 _MODEL_ID = re.compile(r"^[A-Za-z0-9._:/-]+$")
 _HOSTNAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
+_GITHUB_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
+_GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$")
 DEFAULT_ALLOWED_HOSTS = ("github.com",)
 
 
@@ -79,6 +81,8 @@ class PRReviewConfig(BaseModel):
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS), min_length=1, max_length=20)
     models: PRReviewModelsConfig = Field(default_factory=PRReviewModelsConfig)
     limits: PRReviewLimitsConfig = Field(default_factory=PRReviewLimitsConfig)
+    # gh account per "host", "host/owner", or "host/owner/repo"; the most specific match wins.
+    github_accounts: dict[str, str] = Field(default_factory=dict, max_length=100)
 
     @field_validator("allowed_hosts")
     @classmethod
@@ -87,6 +91,29 @@ class PRReviewConfig(BaseModel):
         if any(len(host) > 253 or not _HOSTNAME.fullmatch(host) for host in hosts):
             raise ValueError("allowed_hosts must contain valid hostnames without schemes, ports, or paths")
         return list(dict.fromkeys(hosts))
+
+    @field_validator("github_accounts")
+    @classmethod
+    def _check_github_accounts(cls, value: dict[str, str]) -> dict[str, str]:
+        accounts: dict[str, str] = {}
+        for key, login in value.items():
+            parts = key.lower().split("/")
+            if len(parts) > 3 or any(part in {".", ".."} or not _GITHUB_SEGMENT.fullmatch(part) for part in parts[1:]):
+                raise ValueError('github_accounts keys must be "host", "host/owner", or "host/owner/repo"')
+            if not _GITHUB_LOGIN.fullmatch(login):
+                raise ValueError(f'github_accounts value for "{key}" is not a valid GitHub login')
+            normalized = "/".join(parts)
+            if normalized in accounts:
+                raise ValueError(f'github_accounts has duplicate key "{key}"')
+            accounts[normalized] = login
+        return accounts
+
+    @model_validator(mode="after")
+    def _check_account_hosts(self) -> PRReviewConfig:
+        unknown = sorted({key.split("/")[0] for key in self.github_accounts} - set(self.allowed_hosts))
+        if unknown:
+            raise ValueError(f"github_accounts hosts must be listed in allowed_hosts: {', '.join(unknown)}")
+        return self
 
 
 class Config(BaseModel):

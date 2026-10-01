@@ -89,6 +89,12 @@ class FakeGit:
         self.excluded_paths = ()
         self.base_sha = "base-sha"
         self.head_sha = "head-sha"
+        self.login = "reviewer"
+        self.bindings = []
+
+    def bind(self, host, account):
+        self.bindings.append((host, account))
+        return self
 
     async def clone_or_fetch(self, ref, base_dir):
         self.clone_calls += 1
@@ -123,7 +129,7 @@ class FakeGit:
         return "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -0,0 +1 @@\n+value = 1\n"
 
     async def authenticated_user(self, host):
-        return "reviewer"
+        return self.login
 
     async def remove_worktree(self, repo_path, worktree_path):
         self.removed.append(worktree_path)
@@ -815,6 +821,49 @@ async def test_commit_rejects_when_authenticated_user_changed(monkeypatch, tmp_p
     # would post under the changed identity.
     assert git.auth_calls == 2
     assert git.posted == []
+
+
+async def test_prepare_and_commit_use_the_account_stored_with_the_operation(monkeypatch, tmp_path):
+    _patch_graph_fakes(monkeypatch)
+    store = FakeStore()
+    git = FakeGit()
+    # GitHub logins are case-insensitive, so its canonical spelling still matches the mapped account.
+    git.login = "Mapped-User"
+    deps = _make_deps(tmp_path, store, git)
+    state = _initial_state("operation-1", {"quality": ["model-a"], "security": ["model-b"]})
+    state["request"]["github_account"] = "mapped-user"
+    graph_config = {"configurable": {"thread_id": "operation-1"}, "recursion_limit": 100}
+    async with AsyncSqliteSaver.from_conn_string(os.fspath(tmp_path / "account.sqlite3")) as checkpointer:
+        await checkpointer.setup()
+        graph = build_review_graph(deps, checkpointer)
+        assert (await graph.ainvoke(state, config=graph_config))["__interrupt__"]
+        await graph.ainvoke(
+            Command(
+                resume={
+                    "action": "commit",
+                    "revision": store.preview["revision"],
+                    "payload_hash": store.preview["payload_hash"],
+                }
+            ),
+            config=graph_config,
+        )
+
+    assert git.bindings == [("github.com", "mapped-user"), ("github.com", "mapped-user")]
+    assert len(git.posted) == 1
+
+
+async def test_prepare_rejects_a_token_for_a_different_account(monkeypatch, tmp_path):
+    _patch_graph_fakes(monkeypatch)
+    git = FakeGit()
+    git.login = "someone-else"
+    deps = _make_deps(tmp_path, FakeStore(), git)
+    state = _initial_state("operation-1", {"quality": ["model-a"], "security": ["model-b"]})
+    state["request"]["github_account"] = "mapped-user"
+    async with AsyncSqliteSaver.from_conn_string(os.fspath(tmp_path / "wrong.sqlite3")) as checkpointer:
+        await checkpointer.setup()
+        graph = build_review_graph(deps, checkpointer)
+        with pytest.raises(ReviewError, match='"mapped-user" authenticated as "someone-else"'):
+            await graph.ainvoke(state, config={"configurable": {"thread_id": "operation-1"}, "recursion_limit": 100})
 
 
 async def test_cancel_decision_cleans_up_without_posting(monkeypatch, tmp_path):

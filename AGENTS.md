@@ -207,6 +207,10 @@ repository to any shared config, secret, catalog, or API changes in the same cha
   OS-keyring service `localmcp`, using the logical secret name as the account. The `openai_compatible` backend uses
   `llm_api_key`; the `native` backend uses `openai_api_key` and `anthropic_api_key` as required by the selected
   models. GitHub authentication is owned by `gh`, using its credential store or `GH_TOKEN`/`GITHUB_TOKEN`.
+  `[pr_review.github_accounts]` optionally maps `host`, `host/owner`, or `host/owner/repo` to a `gh` login. A mapped
+  operation records the login in its request snapshot, verifies it at start, and passes that account's token to each
+  `gh` and networked `git` call (SSH remotes rewritten to HTTPS, `gh` as the only credential helper) instead of
+  inherited token variables. Never switch `gh`'s active account; unmapped hosts keep the inherited environment.
 - Never log secret values. Logs may identify only the logical secret name and resolution source.
 
 `[llm].backend` is explicitly either `openai_compatible` or `native`; it is never inferred from available secrets.

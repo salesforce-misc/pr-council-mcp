@@ -148,6 +148,22 @@ Authenticate `gh` for the additional host with `gh auth login --hostname github.
 authentication to a GitHub Enterprise Server host, set `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN` instead;
 `GH_TOKEN` and `GITHUB_TOKEN` apply to `github.com` and `ghe.com` hosts.
 
+By default, every review uses the GitHub identity `gh` resolves from the server's environment. To review and publish as
+different accounts per host, owner, or repository, log each account in with `gh auth login` and map them; the most
+specific match wins, keys ignore case, and each login must match `gh auth status` exactly:
+
+```toml
+[server.pr-council-mcp.pr_review.github_accounts]
+"github.com" = "work-account"
+"github.com/example-org" = "personal-account"
+"github.com/example-org/special-repo" = "other-account"
+```
+
+A mapped review gets that account's token from `gh auth token --user` for each GitHub call, ignoring inherited
+`GH_TOKEN`-style variables, and fetches over HTTPS with `gh` as the Git credential helper. Nothing changes `gh`'s
+active account, so concurrent reviews can use different identities. Starting a review fails immediately if the
+account's token authenticates as someone else, and publication uses the account recorded when the review started.
+
 Secrets resolve from declared environment aliases first and the shared `localmcp` OS-keyring service second. The
 native backend resolves `openai_api_key` and `anthropic_api_key` as required by the selected models. GitHub
 authentication is owned by `gh`, using the host-specific credentials described above. Secret values are never logged.
