@@ -211,8 +211,10 @@ class GitHubCli:
             raise ReviewError(missing) from exc
         if not token:
             raise ReviewError(missing)
-        # gh reads GH_TOKEN for github.com and GH_ENTERPRISE_TOKEN for other hosts.
-        return {**env, "GH_TOKEN": token, "GH_ENTERPRISE_TOKEN": token}
+        # gh reads GH_TOKEN for github.com and ghe.com hosts and GH_ENTERPRISE_TOKEN for others; setting only the
+        # host's variable keeps gh from offering this token to any other host.
+        name = "GH_TOKEN" if host == "github.com" or host.endswith(".ghe.com") else "GH_ENTERPRISE_TOKEN"
+        return {**env, name: token}
 
     async def _git_network_env(self) -> dict[str, str] | None:
         """Return the environment for Git commands that contact the bound host.
@@ -226,7 +228,8 @@ class GitHubCli:
         host = self._bound_host
         settings = [
             ("credential.helper", ""),
-            ("credential.helper", "!gh auth git-credential"),
+            # Scoped to the bound host so a rewrite or redirect elsewhere never receives the account's token.
+            (f"credential.https://{host}.helper", "!gh auth git-credential"),
             (f"url.https://{host}/.insteadOf", f"git@{host}:"),
             (f"url.https://{host}/.insteadOf", f"ssh://git@{host}/"),
             # An inherited HTTPS-to-SSH rewrite would otherwise authenticate with an SSH key, not the bound account.

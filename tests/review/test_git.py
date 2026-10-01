@@ -840,8 +840,28 @@ async def test_bound_calls_get_only_the_mapped_account_token(monkeypatch):
     # An inherited token would make gh ignore --user, so it must not reach the lookup.
     assert not {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} & set(token_env)
     assert api_args == ["api", "user", "--jq", ".login"]
-    assert api_env["GH_TOKEN"] == api_env["GH_ENTERPRISE_TOKEN"] == "gho_mapped"
-    assert "GITHUB_TOKEN" not in api_env and "GITHUB_ENTERPRISE_TOKEN" not in api_env
+    assert api_env["GH_TOKEN"] == "gho_mapped"
+    assert not {"GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} & set(api_env)
+
+
+@pytest.mark.parametrize(
+    ("host", "variable", "other"),
+    [
+        ("github.com", "GH_TOKEN", "GH_ENTERPRISE_TOKEN"),
+        ("acme.ghe.com", "GH_TOKEN", "GH_ENTERPRISE_TOKEN"),
+        ("ghe.example", "GH_ENTERPRISE_TOKEN", "GH_TOKEN"),
+    ],
+)
+async def test_bound_token_is_exported_only_for_its_host_kind(monkeypatch, host, variable, other):
+    cli = GitHubCli(allowed_hosts=[host]).bind(host, "mapped-user")
+    calls = []
+    _token_stub(monkeypatch, cli, calls)
+
+    await cli.authenticated_user(host)
+
+    api_env = calls[-1][1]
+    assert api_env[variable] == "gho_mapped"
+    assert other not in api_env
 
 
 async def test_bound_calls_reject_another_host(monkeypatch):
@@ -875,14 +895,38 @@ async def test_bound_git_fetches_rewrite_ssh_remotes_to_https_with_gh_credential
     url = subprocess.run(
         ["git", "ls-remote", "--get-url", "origin"], cwd=repo, env=env, capture_output=True, text=True, check=True
     ).stdout.strip()
-    helpers = subprocess.run(
-        ["git", "config", "--get-all", "credential.helper"], cwd=repo, env=env, capture_output=True, text=True
-    ).stdout.splitlines()
+    helper = subprocess.run(
+        ["git", "config", "--get-urlmatch", "credential.helper", url], cwd=repo, env=env, capture_output=True, text=True
+    ).stdout.strip()
 
     assert url == "https://github.com/acme/repo.git"
-    # The empty entry discards inherited helpers so only gh supplies credentials.
-    assert helpers[-2:] == ["", "!gh auth git-credential"]
+    assert helper == "!gh auth git-credential"
     assert env["GH_TOKEN"] == "gho_mapped"
+
+
+async def test_bound_git_offers_credentials_only_to_the_bound_host(monkeypatch, tmp_path):
+    global_config = tmp_path / "gitconfig"
+    global_config.write_text(
+        '[credential "https://other.example"]\n\thelper = "!f() { echo username=x; echo password=inherited; }; f"\n'
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.fspath(global_config))
+    cli = GitHubCli().bind("github.com", "mapped-user")
+    _token_stub(monkeypatch, cli, [])
+
+    env = await cli._git_network_env()
+    assert env is not None
+    result = subprocess.run(
+        ["git", "credential", "fill"],
+        cwd=tmp_path,
+        env=env,
+        input="protocol=https\nhost=other.example\n\n",
+        capture_output=True,
+        text=True,
+    )
+
+    # A rewrite or redirect to another host must get neither gh's helper nor an inherited one.
+    assert result.returncode != 0
+    assert "password=" not in result.stdout
 
 
 async def test_bound_fetch_head_uses_the_account_network_environment(monkeypatch, tmp_path):
@@ -920,7 +964,7 @@ async def test_bound_git_network_env_keeps_inherited_git_config_entries(monkeypa
         ).stdout.splitlines()
 
     assert config("http.proxy") == ["http://proxy.example:3128"]
-    assert config("credential.helper")[-1] == "!gh auth git-credential"
+    assert config("credential.https://github.com.helper")[-1] == "!gh auth git-credential"
     assert env["GIT_CONFIG_COUNT"] == "6"
 
 
