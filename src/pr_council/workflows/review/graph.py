@@ -515,7 +515,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                         )
                     raise
         login = await git.authenticated_user(ref.host)
-        if github_account is not None and login != github_account:
+        if github_account is not None and login.lower() != github_account.lower():
             raise ReviewError(f'the token for GitHub account "{github_account}" authenticated as "{login}"')
         timing = {**state.get("timing", {}), "setupMs": int(time.time() * 1000) - began}
         catalog_state = {

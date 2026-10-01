@@ -827,7 +827,8 @@ async def test_prepare_and_commit_use_the_account_stored_with_the_operation(monk
     _patch_graph_fakes(monkeypatch)
     store = FakeStore()
     git = FakeGit()
-    git.login = "mapped-user"
+    # GitHub logins are case-insensitive, so its canonical spelling still matches the mapped account.
+    git.login = "Mapped-User"
     deps = _make_deps(tmp_path, store, git)
     state = _initial_state("operation-1", {"quality": ["model-a"], "security": ["model-b"]})
     state["request"]["github_account"] = "mapped-user"

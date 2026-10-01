@@ -241,7 +241,7 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
         if github_account is not None:
             # Fail before any review work when the mapped account cannot act on this host.
             login = await self.git.bind(ref.host, github_account).authenticated_user(ref.host)
-            if login != github_account:
+            if login.lower() != github_account.lower():
                 raise ReviewError(
                     f'the token for GitHub account "{github_account}" authenticated as "{login}" on {ref.host}'
                 )

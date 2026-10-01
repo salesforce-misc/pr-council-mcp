@@ -901,3 +901,56 @@ async def test_bound_fetch_head_uses_the_account_network_environment(monkeypatch
     fetch = next(env for command, args, env in calls if args[0] == "fetch")
     assert fetch is not None and fetch["GH_TOKEN"] == "gho_mapped"
     assert "!gh auth git-credential" in fetch.values()
+
+
+async def test_bound_git_network_env_keeps_inherited_git_config_entries(monkeypatch, tmp_path):
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "http.proxy")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "http://proxy.example:3128")
+    cli = GitHubCli().bind("github.com", "mapped-user")
+    _token_stub(monkeypatch, cli, [])
+
+    env = await cli._git_network_env()
+    assert env is not None
+
+    def config(key):
+        return subprocess.run(
+            ["git", "config", "--get-all", key], cwd=tmp_path, env=env, capture_output=True, text=True
+        ).stdout.splitlines()
+
+    assert config("http.proxy") == ["http://proxy.example:3128"]
+    assert config("credential.helper")[-1] == "!gh auth git-credential"
+    assert env["GIT_CONFIG_COUNT"] == "5"
+
+
+@pytest.mark.parametrize("account", [None, "mapped-user"])
+async def test_managed_hydration_runs_every_remote_capable_git_command_as_the_bound_account(
+    monkeypatch, tmp_path, account
+):
+    cli = GitHubCli().bind("github.com", account)
+    calls = []
+
+    async def run(self, command, args, **kwargs):
+        if args[:2] == ["auth", "token"]:
+            return "gho_mapped\n"
+        calls.append((args[0], kwargs.get("env")))
+        return ""
+
+    monkeypatch.setattr(git_module.GitHubCli, "_run", run)
+
+    await cli.materialize_comparison(tmp_path, base_sha="a" * 40, head_sha="b" * 40, operation_id="op-1")
+    await cli.create_worktree(tmp_path, tmp_path / "worktrees" / "op-1", "b" * 40)
+
+    envs = {name: [env for command, env in calls if command == name] for name in ("cat-file", "diff", "worktree")}
+    assert len(envs["cat-file"]) == 2 and len(envs["diff"]) == 1 and len(envs["worktree"]) == 1
+    if account is None:
+        # Unmapped operations keep the inherited Git environment and credentials.
+        assert all(env is None for found in envs.values() for env in found)
+        return
+    # A blobless clone fetches missing objects on demand, so these must authenticate as the bound account too.
+    for env in (*envs["cat-file"], *envs["diff"], *envs["worktree"]):
+        assert env is not None and env["GH_TOKEN"] == "gho_mapped"
+        assert "!gh auth git-credential" in env.values()
+    # Presence checks report a missing commit instead of fetching it; the explicit fetch handles that.
+    assert all(env["GIT_NO_LAZY_FETCH"] == "1" for env in envs["cat-file"])
+    assert "GIT_NO_LAZY_FETCH" not in envs["diff"][0] and "GIT_NO_LAZY_FETCH" not in envs["worktree"][0]

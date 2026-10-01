@@ -150,7 +150,7 @@ authentication to a GitHub Enterprise Server host, set `GH_ENTERPRISE_TOKEN` or 
 
 By default, every review uses the GitHub identity `gh` resolves from the server's environment. To review and publish as
 different accounts per host, owner, or repository, log each account in with `gh auth login` and map them; the most
-specific match wins and matching ignores case:
+specific match wins, keys ignore case, and each login must match `gh auth status` exactly:
 
 ```toml
 [server.pr-council-mcp.pr_review.github_accounts]

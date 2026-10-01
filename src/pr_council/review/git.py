@@ -200,7 +200,8 @@ class GitHubCli:
             env.pop(name, None)
         missing = (
             f'gh has no token for GitHub account "{self._account}" on {host}; '
-            f"run `gh auth login --hostname {host}` as that account"
+            f"run `gh auth login --hostname {host}` as that account, or use its login exactly as "
+            "`gh auth status` shows it"
         )
         try:
             token = (
@@ -229,11 +230,20 @@ class GitHubCli:
             (f"url.https://{host}/.insteadOf", f"git@{host}:"),
             (f"url.https://{host}/.insteadOf", f"ssh://git@{host}/"),
         ]
-        env = {**(await self._env(host)), "GIT_CONFIG_COUNT": str(len(settings)), "GIT_TERMINAL_PROMPT": "0"}
-        for index, (key, value) in enumerate(settings):
+        env = {**(await self._env(host)), "GIT_TERMINAL_PROMPT": "0"}
+        # Append after inherited GIT_CONFIG_* entries, such as proxy or CA settings, rather than replacing them.
+        inherited = env.get("GIT_CONFIG_COUNT", "")
+        start = int(inherited) if inherited.isdigit() else 0
+        for index, (key, value) in enumerate(settings, start):
             env[f"GIT_CONFIG_KEY_{index}"] = key
             env[f"GIT_CONFIG_VALUE_{index}"] = value
+        env["GIT_CONFIG_COUNT"] = str(start + len(settings))
         return env
+
+    async def _git_presence_env(self) -> dict[str, str] | None:
+        """Return the environment for bound object-presence checks, which must not fetch lazily."""
+        network = await self._git_network_env()
+        return None if network is None else {**network, "GIT_NO_LAZY_FETCH": "1"}
 
     @staticmethod
     def _local_git_env() -> dict[str, str]:
@@ -350,18 +360,22 @@ class GitHubCli:
             or not _SEGMENT.fullmatch(operation_id)
         ):
             raise ReviewError("comparison contains an invalid object ID or operation ID")
+        # Blobless clones fetch missing objects on demand, so a bound adapter passes its account environment to
+        # every command that may contact the remote, not only to explicit fetches.
+        network_env = await self._git_network_env()
+        presence_env = await self._git_presence_env()
         try:
-            await self._run("git", ["cat-file", "-e", f"{base_sha}^{{commit}}"], cwd=repo_path)
+            await self._run("git", ["cat-file", "-e", f"{base_sha}^{{commit}}"], cwd=repo_path, env=presence_env)
         except ReviewError:
-            await self._run("git", ["fetch", "origin", base_sha], cwd=repo_path, env=await self._git_network_env())
-        await self._run("git", ["cat-file", "-e", f"{head_sha}^{{commit}}"], cwd=repo_path)
+            await self._run("git", ["fetch", "origin", base_sha], cwd=repo_path, env=network_env)
+        await self._run("git", ["cat-file", "-e", f"{head_sha}^{{commit}}"], cwd=repo_path, env=presence_env)
         namespace = f"refs/pr-council-mcp/{operation_id}"
         try:
             await self._run("git", ["update-ref", f"{namespace}/base", base_sha], cwd=repo_path)
             await self._run("git", ["update-ref", f"{namespace}/head", head_sha], cwd=repo_path)
             # Producing the exact canonical comparison on the trusted host
             # forces promised blobs into the clone before no-network model use.
-            await self._run("git", ["diff", f"{base_sha}...{head_sha}"], cwd=repo_path)
+            await self._run("git", ["diff", f"{base_sha}...{head_sha}"], cwd=repo_path, env=network_env)
         except BaseException:
             for name in ("base", "head"):
                 try:
@@ -387,7 +401,12 @@ class GitHubCli:
         worktree_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if worktree_path.exists():
             await self.remove_worktree(repo_path, worktree_path)
-        await self._run("git", ["worktree", "add", "--detach", os.fspath(worktree_path), head_sha], cwd=repo_path)
+        await self._run(
+            "git",
+            ["worktree", "add", "--detach", os.fspath(worktree_path), head_sha],
+            cwd=repo_path,
+            env=await self._git_network_env(),
+        )
 
     @staticmethod
     def linked_worktree_metadata_root(repo_path: Path, worktree_path: Path, repositories_root: Path) -> Path:

@@ -657,6 +657,19 @@ async def test_start_rejects_a_mapped_account_whose_token_is_someone_else(monkey
         await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
 
 
+async def test_start_accepts_the_mapped_login_in_github_canonical_case(monkeypatch, tmp_path):
+    runtime = _account_runtime(tmp_path / "state", {"github.com": "host-user"})
+    await asyncio.wait_for(runtime.start(), timeout=_TIMEOUT)
+    monkeypatch.setattr(runtime, "_spawn", lambda *args, **kwargs: None)
+    monkeypatch.setattr("pr_council.review.git.GitHubCli.authenticated_user", AsyncMock(return_value="Host-User"))
+    try:
+        record = await _start_review(runtime)
+    finally:
+        await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
+
+    assert record.request["github_account"] == "host-user"
+
+
 async def test_start_without_a_mapping_keeps_the_inherited_identity(monkeypatch, tmp_path):
     runtime = _account_runtime(tmp_path / "state", {})
     await asyncio.wait_for(runtime.start(), timeout=_TIMEOUT)
