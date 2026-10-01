@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import re
 import shutil
 import tempfile
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ _SAFE_LOCAL_CONFIG_KEY = re.compile(
     r"submodule\..+\.(?:url|active)"
     r")$"
 )
+_GITHUB_TOKEN_ENV_VARS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 _REMOTE_URL_CONFIG_KEY = re.compile(r"^(?:remote|submodule)\..+\.url$")
 _SENSITIVE_GIT_METADATA_NAMES = (
     "AUTO_MERGE",
@@ -90,11 +92,37 @@ class GitHubCli:
         command_timeout_seconds: float = _COMMAND_TIMEOUT_SECONDS,
         max_repository_bytes: int = 5 * 1024 * 1024 * 1024,
         allowed_hosts: Collection[str] = DEFAULT_ALLOWED_HOSTS,
+        accounts: Mapping[str, str] | None = None,
     ):
         self.max_output_bytes = max_output_bytes
         self.command_timeout_seconds = command_timeout_seconds
         self.max_repository_bytes = max_repository_bytes
         self.allowed_hosts = frozenset(allowed_hosts)
+        self.accounts = {key.lower(): login for key, login in (accounts or {}).items()}
+        self._bound_host: str | None = None
+        self._account: str | None = None
+
+    def account_for(self, ref: PrRef) -> str | None:
+        """Return the mapped login for a PR, preferring repository over owner over host matches."""
+        host, owner, repo = ref.host.lower(), ref.owner.lower(), ref.repo.lower()
+        for key in (f"{host}/{owner}/{repo}", f"{host}/{owner}", host):
+            if key in self.accounts:
+                return self.accounts[key]
+        return None
+
+    def bind(self, host: str, account: str | None) -> GitHubCli:
+        """Return an adapter whose GitHub calls for ``host`` authenticate as ``account``.
+
+        Each call receives the account's token in its own environment, so nothing
+        shared, such as gh's active account, is changed. ``None`` keeps the
+        inherited environment.
+        """
+        if host not in self.allowed_hosts:
+            raise ReviewError("GitHub host is not allowed by server configuration")
+        bound = copy.copy(self)
+        bound._bound_host = host
+        bound._account = account
+        return bound
 
     async def _communicate(self, process: asyncio.subprocess.Process, command: str) -> tuple[bytes, bytes]:
         total_bytes = 0
@@ -159,10 +187,53 @@ class GitHubCli:
             raise ReviewError(f"{command} command failed with exit code {process.returncode}")
         return out
 
-    def _env(self, host: str) -> dict[str, str]:
+    async def _env(self, host: str) -> dict[str, str]:
         if host not in self.allowed_hosts:
             raise ReviewError("GitHub host is not allowed by server configuration")
-        return {**os.environ, "GH_HOST": host, "LC_ALL": "C"}
+        env = {**os.environ, "GH_HOST": host, "LC_ALL": "C"}
+        if self._account is None:
+            return env
+        if host != self._bound_host:
+            raise ReviewError("GitHub host does not match the account-bound adapter")
+        # gh prefers environment tokens, so inherited ones would override the requested account.
+        for name in _GITHUB_TOKEN_ENV_VARS:
+            env.pop(name, None)
+        missing = (
+            f'gh has no token for GitHub account "{self._account}" on {host}; '
+            f"run `gh auth login --hostname {host}` as that account"
+        )
+        try:
+            token = (
+                await self._run("gh", ["auth", "token", "--hostname", host, "--user", self._account], env=env)
+            ).strip()
+        except ReviewError as exc:
+            raise ReviewError(missing) from exc
+        if not token:
+            raise ReviewError(missing)
+        # gh reads GH_TOKEN for github.com and GH_ENTERPRISE_TOKEN for other hosts.
+        return {**env, "GH_TOKEN": token, "GH_ENTERPRISE_TOKEN": token}
+
+    async def _git_network_env(self) -> dict[str, str] | None:
+        """Return the environment for Git commands that contact the bound host.
+
+        Unbound adapters keep the inherited environment and credential setup. Bound
+        adapters rewrite SSH remotes to HTTPS and use only gh's credential helper,
+        so fetches authenticate as the bound account rather than with an SSH key.
+        """
+        if self._account is None or self._bound_host is None:
+            return None
+        host = self._bound_host
+        settings = [
+            ("credential.helper", ""),
+            ("credential.helper", "!gh auth git-credential"),
+            (f"url.https://{host}/.insteadOf", f"git@{host}:"),
+            (f"url.https://{host}/.insteadOf", f"ssh://git@{host}/"),
+        ]
+        env = {**(await self._env(host)), "GIT_CONFIG_COUNT": str(len(settings)), "GIT_TERMINAL_PROMPT": "0"}
+        for index, (key, value) in enumerate(settings):
+            env[f"GIT_CONFIG_KEY_{index}"] = key
+            env[f"GIT_CONFIG_VALUE_{index}"] = value
+        return env
 
     @staticmethod
     def _local_git_env() -> dict[str, str]:
@@ -183,7 +254,7 @@ class GitHubCli:
         }
 
     async def authenticated_user(self, host: str) -> str:
-        return (await self._run("gh", ["api", "user", "--jq", ".login"], env=self._env(host))).strip()
+        return (await self._run("gh", ["api", "user", "--jq", ".login"], env=await self._env(host))).strip()
 
     async def clone_or_fetch(self, ref: PrRef, base_dir: Path) -> Path:
         self._validate_repository(ref.host, ref.owner, ref.repo)
@@ -211,13 +282,15 @@ class GitHubCli:
         if repo_path.exists():
             if await asyncio.to_thread(self._directory_exceeds_limit, repo_path):
                 raise ReviewError("local repository exceeds the configured size safety limit")
-            await self._run("git", ["fetch", "origin", "--tags", "--prune"], cwd=repo_path)
+            await self._run(
+                "git", ["fetch", "origin", "--tags", "--prune"], cwd=repo_path, env=await self._git_network_env()
+            )
         else:
             repo_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             await self._run(
                 "gh",
                 ["repo", "clone", f"{owner}/{repo}", os.fspath(repo_path), "--", "--filter=blob:none"],
-                env=self._env(host),
+                env=await self._git_network_env() or await self._env(host),
             )
         if await asyncio.to_thread(self._directory_exceeds_limit, repo_path):
             raise ReviewError("local repository exceeds the configured size safety limit")
@@ -250,7 +323,9 @@ class GitHubCli:
 
     async def fetch_head(self, repo_path: Path, pr_number: int) -> str:
         ref = f"refs/pull/{pr_number}/head"
-        await self._run("git", ["fetch", "origin", f"{ref}:{ref}", "--force"], cwd=repo_path)
+        await self._run(
+            "git", ["fetch", "origin", f"{ref}:{ref}", "--force"], cwd=repo_path, env=await self._git_network_env()
+        )
         return (await self._run("git", ["rev-parse", ref], cwd=repo_path)).strip()
 
     async def pr_shas(self, ref: PrRef) -> tuple[str, str]:
@@ -278,7 +353,7 @@ class GitHubCli:
         try:
             await self._run("git", ["cat-file", "-e", f"{base_sha}^{{commit}}"], cwd=repo_path)
         except ReviewError:
-            await self._run("git", ["fetch", "origin", base_sha], cwd=repo_path)
+            await self._run("git", ["fetch", "origin", base_sha], cwd=repo_path, env=await self._git_network_env())
         await self._run("git", ["cat-file", "-e", f"{head_sha}^{{commit}}"], cwd=repo_path)
         namespace = f"refs/pr-council-mcp/{operation_id}"
         try:
@@ -654,14 +729,14 @@ class GitHubCli:
             "gh",
             ["pr", "diff", str(ref.number), "--repo", ref.repo_key],
             cwd=repo_path,
-            env=self._env(ref.host),
+            env=await self._env(ref.host),
         )
 
     async def _api_json(self, ref: PrRef, endpoint: str) -> Any:
         return await self._api_json_for_host(ref.host, endpoint)
 
     async def _api_json_for_host(self, host: str, endpoint: str) -> Any:
-        raw = await self._run("gh", ["api", endpoint, "--paginate"], env=self._env(host))
+        raw = await self._run("gh", ["api", endpoint, "--paginate"], env=await self._env(host))
         documents = [json.loads(line) for line in raw.splitlines() if line.strip()]
         if len(documents) == 1:
             return documents[0]
@@ -712,5 +787,5 @@ class GitHubCli:
                     "--input",
                     os.fspath(body_path),
                 ],
-                env=self._env(ref.host),
+                env=await self._env(ref.host),
             )

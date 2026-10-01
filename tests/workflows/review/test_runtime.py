@@ -609,3 +609,65 @@ async def test_run_applies_the_snapshotted_model_concurrency_limit(monkeypatch, 
         assert captured["max_concurrency"] == 3
     finally:
         await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
+
+
+def _account_runtime(state_root: Path, accounts: dict[str, str]) -> ReviewRuntime:
+    return _runtime(Config(pr_review=PRReviewConfig(github_accounts=accounts)), state_root)
+
+
+async def _start_review(runtime: ReviewRuntime, pr_url: str = "https://github.com/Acme/repo/pull/7"):
+    return await asyncio.wait_for(
+        runtime.start_operation(
+            pr_url=pr_url, context=[], mode=ReviewMode.INITIAL, baseline_operation_id=None, iterations=1
+        ),
+        timeout=_TIMEOUT,
+    )
+
+
+async def test_start_verifies_and_snapshots_the_mapped_github_account(monkeypatch, tmp_path):
+    runtime = _account_runtime(tmp_path / "state", {"github.com": "host-user", "github.com/acme": "owner-user"})
+    await asyncio.wait_for(runtime.start(), timeout=_TIMEOUT)
+    monkeypatch.setattr(runtime, "_spawn", lambda *args, **kwargs: None)
+    checked = []
+
+    async def authenticated_user(self, host):
+        checked.append((host, self._account))
+        return self._account
+
+    monkeypatch.setattr("pr_council.review.git.GitHubCli.authenticated_user", authenticated_user)
+    try:
+        record = await _start_review(runtime)
+    finally:
+        await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
+
+    assert checked == [("github.com", "owner-user")]
+    assert record.request["github_account"] == "owner-user"
+
+
+async def test_start_rejects_a_mapped_account_whose_token_is_someone_else(monkeypatch, tmp_path):
+    runtime = _account_runtime(tmp_path / "state", {"github.com": "host-user"})
+    await asyncio.wait_for(runtime.start(), timeout=_TIMEOUT)
+    monkeypatch.setattr(runtime, "_spawn", lambda *args, **kwargs: None)
+    monkeypatch.setattr("pr_council.review.git.GitHubCli.authenticated_user", AsyncMock(return_value="other-user"))
+    try:
+        with pytest.raises(ReviewError, match='"host-user" authenticated as "other-user"'):
+            await _start_review(runtime)
+        assert await runtime._require_store().recoverable() == []
+    finally:
+        await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
+
+
+async def test_start_without_a_mapping_keeps_the_inherited_identity(monkeypatch, tmp_path):
+    runtime = _account_runtime(tmp_path / "state", {})
+    await asyncio.wait_for(runtime.start(), timeout=_TIMEOUT)
+    monkeypatch.setattr(runtime, "_spawn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "pr_council.review.git.GitHubCli.authenticated_user",
+        AsyncMock(side_effect=AssertionError("no identity check without a mapping")),
+    )
+    try:
+        record = await _start_review(runtime)
+    finally:
+        await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
+
+    assert record.request["github_account"] is None

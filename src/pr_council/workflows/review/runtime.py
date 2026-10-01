@@ -65,6 +65,7 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
         self.git = GitHubCli(
             max_repository_bytes=config.pr_review.limits.repository_size_mib * 1024 * 1024,
             allowed_hosts=config.pr_review.allowed_hosts,
+            accounts=config.pr_review.github_accounts,
         )
         self.lock = RepoLock(self.root / "locks")
 
@@ -236,6 +237,14 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
                 self.model_factory.validate(model_id)
             except ModelConfigurationError as exc:
                 raise ReviewError(str(exc)) from exc
+        github_account = self.git.account_for(ref)
+        if github_account is not None:
+            # Fail before any review work when the mapped account cannot act on this host.
+            login = await self.git.bind(ref.host, github_account).authenticated_user(ref.host)
+            if login != github_account:
+                raise ReviewError(
+                    f'the token for GitHub account "{github_account}" authenticated as "{login}" on {ref.host}'
+                )
         baseline = None
         if baseline_operation_id:
             if mode == ReviewMode.INITIAL:
@@ -255,6 +264,7 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
         request = {
             "owner_uid": owner_uid,
             "ref": ref.model_dump(mode="json"),
+            "github_account": github_account,
             "source_mode": source_mode.value,
             "local_source_path": os.fspath(resolved_local_source) if resolved_local_source is not None else None,
             "mode": mode.value,

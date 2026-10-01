@@ -54,3 +54,29 @@ def test_review_limits_and_model_ids_remain_bounded() -> None:
         PRReviewLimitsConfig(rate_limit_base_delay_seconds=10, rate_limit_max_delay_seconds=5)
     with pytest.raises(ValidationError, match="model IDs"):
         PRReviewModelsConfig(quality=["bad model id"])
+
+
+def test_github_accounts_are_normalized_and_bound_to_allowed_hosts() -> None:
+    config = parse_config(
+        ServerConfig(
+            name="pr-council-mcp",
+            values={"pr_review": {"github_accounts": {"GitHub.com": "host_user", "github.com/Acme/Repo": "repo-user"}}},
+        )
+    )
+
+    assert config.pr_review.github_accounts == {"github.com": "host_user", "github.com/acme/repo": "repo-user"}
+
+
+@pytest.mark.parametrize(
+    ("accounts", "message"),
+    [
+        ({"github.com/acme/repo/extra": "user"}, "keys must be"),
+        ({"github.com/..": "user"}, "keys must be"),
+        ({"github.com": "not a login"}, "not a valid GitHub login"),
+        ({"github.com/acme": "a", "github.com/ACME": "b"}, "duplicate key"),
+        ({"ghe.example": "user"}, "must be listed in allowed_hosts: ghe.example"),
+    ],
+)
+def test_github_accounts_reject_invalid_entries(accounts: dict[str, str], message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"github_accounts": accounts}}))

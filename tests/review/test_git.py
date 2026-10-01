@@ -775,3 +775,129 @@ async def test_diff_targets_the_pr_repository_explicitly(monkeypatch, tmp_path):
 
     assert await cli.diff(tmp_path, ref) == "diff"
     assert captured["args"] == ["pr", "diff", "42", "--repo", "github.com/acme/widget"]
+
+
+def _ref(host="github.com", owner="acme", repo="repo"):
+    return PrRef(host=host, owner=owner, repo=repo, number=1)
+
+
+def test_account_for_prefers_the_most_specific_case_insensitive_match():
+    cli = GitHubCli(
+        accounts={"github.com": "host-user", "github.com/Acme": "owner-user", "github.com/acme/special": "repo-user"}
+    )
+
+    assert cli.account_for(_ref(owner="ACME", repo="Special")) == "repo-user"
+    assert cli.account_for(_ref(owner="acme", repo="other")) == "owner-user"
+    assert cli.account_for(_ref(owner="acme-labs")) == "host-user"
+    assert GitHubCli().account_for(_ref()) is None
+
+
+def test_bind_rejects_a_host_that_is_not_allowed():
+    with pytest.raises(ReviewError, match="host is not allowed"):
+        GitHubCli().bind("other.example", "user")
+
+
+def _token_stub(monkeypatch, cli, calls, token="gho_mapped"):
+    real_run = cli._run
+
+    async def run(command, args, **kwargs):
+        if command == "gh" and args[:2] == ["auth", "token"]:
+            calls.append((args, kwargs["env"]))
+            return f"{token}\n"
+        if command == "gh":
+            calls.append((args, kwargs["env"]))
+            return "mapped-user\n"
+        return await real_run(command, args, **kwargs)
+
+    monkeypatch.setattr(git_module.GitHubCli, "_run", lambda self, *a, **k: run(*a, **k))
+
+
+async def test_unbound_calls_keep_the_inherited_environment(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "inherited")
+    cli = GitHubCli()
+    calls = []
+    _token_stub(monkeypatch, cli, calls)
+
+    await cli.authenticated_user("github.com")
+
+    assert [args for args, _env in calls] == [["api", "user", "--jq", ".login"]]
+    assert calls[0][1]["GH_TOKEN"] == "inherited"
+    assert await cli.bind("github.com", None)._git_network_env() is None
+
+
+async def test_bound_calls_get_only_the_mapped_account_token(monkeypatch):
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        monkeypatch.setenv(name, "inherited")
+    cli = GitHubCli().bind("github.com", "mapped-user")
+    calls = []
+    _token_stub(monkeypatch, cli, calls)
+
+    assert await cli.authenticated_user("github.com") == "mapped-user"
+
+    (token_args, token_env), (api_args, api_env) = calls
+    assert token_args == ["auth", "token", "--hostname", "github.com", "--user", "mapped-user"]
+    # An inherited token would make gh ignore --user, so it must not reach the lookup.
+    assert not {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} & set(token_env)
+    assert api_args == ["api", "user", "--jq", ".login"]
+    assert api_env["GH_TOKEN"] == api_env["GH_ENTERPRISE_TOKEN"] == "gho_mapped"
+    assert "GITHUB_TOKEN" not in api_env and "GITHUB_ENTERPRISE_TOKEN" not in api_env
+
+
+async def test_bound_calls_reject_another_host(monkeypatch):
+    cli = GitHubCli(allowed_hosts=["github.com", "ghe.example"]).bind("github.com", "mapped-user")
+
+    with pytest.raises(ReviewError, match="does not match the account-bound adapter"):
+        await cli.authenticated_user("ghe.example")
+
+
+async def test_missing_account_token_names_the_account(monkeypatch):
+    cli = GitHubCli().bind("github.com", "mapped-user")
+
+    async def fail(self, command, args, **kwargs):
+        raise ReviewError("gh command failed with exit code 1")
+
+    monkeypatch.setattr(git_module.GitHubCli, "_run", fail)
+
+    with pytest.raises(ReviewError, match='no token for GitHub account "mapped-user" on github.com'):
+        await cli.authenticated_user("github.com")
+
+
+async def test_bound_git_fetches_rewrite_ssh_remotes_to_https_with_gh_credentials(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "git@github.com:acme/repo.git"], check=True)
+    cli = GitHubCli().bind("github.com", "mapped-user")
+    _token_stub(monkeypatch, cli, [])
+
+    env = await cli._git_network_env()
+    assert env is not None
+    url = subprocess.run(
+        ["git", "ls-remote", "--get-url", "origin"], cwd=repo, env=env, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    helpers = subprocess.run(
+        ["git", "config", "--get-all", "credential.helper"], cwd=repo, env=env, capture_output=True, text=True
+    ).stdout.splitlines()
+
+    assert url == "https://github.com/acme/repo.git"
+    # The empty entry discards inherited helpers so only gh supplies credentials.
+    assert helpers[-2:] == ["", "!gh auth git-credential"]
+    assert env["GH_TOKEN"] == "gho_mapped"
+
+
+async def test_bound_fetch_head_uses_the_account_network_environment(monkeypatch, tmp_path):
+    cli = GitHubCli().bind("github.com", "mapped-user")
+    calls = []
+
+    async def run(self, command, args, **kwargs):
+        if args[:2] == ["auth", "token"]:
+            return "gho_mapped\n"
+        calls.append((command, args, kwargs.get("env")))
+        return "a" * 40 + "\n"
+
+    monkeypatch.setattr(git_module.GitHubCli, "_run", run)
+
+    await cli.fetch_head(tmp_path, 7)
+
+    fetch = next(env for command, args, env in calls if args[0] == "fetch")
+    assert fetch is not None and fetch["GH_TOKEN"] == "gho_mapped"
+    assert "!gh auth git-credential" in fetch.values()
