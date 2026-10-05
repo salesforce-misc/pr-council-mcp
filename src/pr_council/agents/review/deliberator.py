@@ -62,8 +62,9 @@ async def deliberate(
             f"You have at most {tool_budget.max_calls} source-tool calls in this pass. "
             "Every tool result reports the remaining budget. Submit your result before it is exhausted."
         ),
-        # Unforced submission tool: ToolStrategy forces tool_choice, which some models reject, and gateways
-        # may drop ProviderStrategy's schema or let a model answer without inspecting the source.
+        # Cross-model requirement: ToolStrategy forces tool_choice, which some models reject, and gateways may
+        # drop ProviderStrategy's schema or let a model answer without inspecting the source. An unforced
+        # submission tool is the lowest common denominator; its in-run correction rounds are deliberate.
         middleware=[SubmitResultMiddleware(DeliberationCandidate)],
         name=f"pr-review-deliberate-{disposition}",
     )
