@@ -499,6 +499,7 @@ async def test_graph_checkpoints_preview_then_resumes_comment_only_commit(
         assert git.local_validation_calls == []
         assert git.released == ["operation-1"]
         assert all(profile.denied_paths == () for profile in FakeReviewerAgent.profiles)
+    assert all("git" in profile.tools for profile in FakeReviewerAgent.profiles)
 
 
 async def test_follow_up_aggregation_uses_synthetic_retained_id(monkeypatch, tmp_path):

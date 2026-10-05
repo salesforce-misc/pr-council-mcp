@@ -16,18 +16,15 @@ from langgraph.types import Send, interrupt
 from localmcp.llm import ModelFactory
 from localmcp.observability.logging import get_logger
 from localmcp.observability.telemetry import LangfuseTelemetry
-from localmcp.sandbox import RootAccess, SandboxProfile, SandboxRoot
+from localmcp.retry import call_with_rate_limit_retry, is_rate_limit_error, is_retryable_error, rate_limit_delay
+from localmcp.sandbox import INSPECTION_TOOLS, RootAccess, SandboxProfile, SandboxRoot
 
 from pr_council.agents.review.aggregator import aggregate
 from pr_council.agents.review.common import (
     ResponseUsageCallback,
     ToolBudget,
     Usage,
-    call_with_rate_limit_retry,
     extract_callback_usage,
-    is_rate_limit_error,
-    is_retryable_error,
-    rate_limit_delay,
 )
 from pr_council.agents.review.deliberator import deliberate
 from pr_council.agents.review.reviewer import ReviewerAgent
@@ -151,6 +148,7 @@ def _review_sandbox_profile(
             SandboxRoot(Path(git_metadata_root), RootAccess.READ_ONLY),
         ),
         denied_paths=tuple(Path(path) for path in source_excluded_paths or ()),
+        tools=(*INSPECTION_TOOLS, "git"),
     )
 
 

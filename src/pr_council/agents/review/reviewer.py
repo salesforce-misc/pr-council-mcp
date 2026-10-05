@@ -79,8 +79,9 @@ class ReviewerAgent:
                 "Every tool result reports the remaining budget. Submit your result before "
                 "it is exhausted."
             ),
-            # Unforced submission tool: ToolStrategy forces tool_choice, which some models reject, and gateways
-            # may drop ProviderStrategy's schema or let a model answer without inspecting the source.
+            # Cross-model requirement: ToolStrategy forces tool_choice, which some models reject, and gateways may
+            # drop ProviderStrategy's schema or let a model answer without inspecting the source. An unforced
+            # submission tool is the lowest common denominator; its in-run correction rounds are deliberate.
             middleware=[SubmitResultMiddleware(RawIterationCandidate)],
             name=f"pr-review-{disposition}",
         )

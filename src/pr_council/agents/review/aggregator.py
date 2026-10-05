@@ -10,6 +10,7 @@ from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AnyMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
+from localmcp.retry import is_retryable_error
 from localmcp.structured_output import SubmitResultError, SubmitResultMiddleware
 
 from pr_council.agents.review.common import (
@@ -17,7 +18,6 @@ from pr_council.agents.review.common import (
     ResponseUsageCallback,
     Usage,
     extract_callback_usage,
-    is_retryable_error,
 )
 from pr_council.review.models import AggregationCandidate, ReviewError
 
@@ -47,8 +47,9 @@ async def aggregate(
     usage: Usage | None = None,
     langfuse_callback: Any | None = None,
 ) -> tuple[AggregationCandidate, Usage]:
-    # The same unforced submission tool as the reviewers: forced tool_choice and provider-native schemas are
-    # not portable across models and gateways.
+    # The same unforced submission tool as the reviewers. This is a cross-model requirement: forced tool_choice
+    # and provider-native schemas are not supported by every model and gateway, so the unforced tool and its
+    # correction rounds are the lowest common denominator.
     agent = create_agent(
         model,
         [],
@@ -78,6 +79,8 @@ async def aggregate(
     # discarded with the raised exception.
     usage = usage if usage is not None else Usage()
     last_error: object = "structured output was missing"
+    # Outer correction rounds re-prompt with the error when the submission tool's own rounds are exhausted or a
+    # well-formed result fails application validation. Transport faults go to the caller's backoff instead.
     for _attempt in range(3):
         usage_callback = ResponseUsageCallback()
         callbacks: list[Any] = [usage_callback]
