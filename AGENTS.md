@@ -44,9 +44,9 @@ The current modules are organized as follows:
   - `locks.py` owns per-repository async locks.
   - `store.py` owns the durable operation catalog beside LangGraph's checkpoint database.
 - **`pr_council/agents/review/`** — the reviewer, closed-set deliberator, and aggregator. Role-specific prompt text
-  is colocated with its owning agent module. `common.py` owns the shared safety prompt builder, tool budgets, usage
-  accounting, and retry helpers. Repository content, diffs, tool output, prior findings, and caller context are always
-  untrusted data.
+  is colocated with its owning agent module. `common.py` owns the shared safety prompt builder, tool budgets, and usage
+  accounting; model-call retry and rate-limit backoff come from `localmcp.retry`. Repository content, diffs, tool
+  output, prior findings, and caller context are always untrusted data.
 - **`localmcp.workflows.runtime.WorkflowRuntime`** owns state-directory permissions, store/checkpointer lifecycle,
   operation leases and heartbeats, background-task tracking, and recovery scheduling. Domain subclasses own graph
   construction, cancellation mapping, and domain-resource cleanup.
