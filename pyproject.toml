@@ -1,6 +1,6 @@
 [project]
 name = "pr-council-mcp"
-version = "0.4.0"
+version = "0.5.0"
 description = "Standalone local MCP server for durable, multi-model pull-request reviews over stdio."
 readme = "README.md"
 requires-python = ">=3.12"
