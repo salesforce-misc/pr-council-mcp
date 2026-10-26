@@ -99,9 +99,9 @@ The lifecycle is:
 - `pr_council_cancel` requests cooperative cancellation before publication begins.
 
 Every operation uses its `operation_id` as the LangGraph `thread_id`. The operation catalog is the query and
-coordination plane: it owns caller binding, status, request/state snapshots, preview/result data, leases, and durable
-tool-call accounting. The LangGraph checkpointer is the execution plane: it owns node progress and resumable graph
-state. Do not collapse these two stores into one abstraction.
+coordination plane: it owns caller binding, status, request/state snapshots, preview/result data, and leases. The
+LangGraph checkpointer is the execution plane: it owns node progress and resumable graph state. Do not collapse these
+two stores into one abstraction.
 
 Operations are bound to the local OS UID; possession of an ID alone is not authorization. Runtime startup recovers
 nonterminal operations. Multiple independent operations may run concurrently, while preparation/publication for the
@@ -166,8 +166,7 @@ Seatbelt, not command curation, is the security boundary:
 - local-mode ignored paths are explicitly denied within the otherwise read-only source root;
 - the caller environment and credentials are not inherited;
 - Git global/system config and terminal prompting are disabled;
-- command length, wall time, CPU time, output bytes, open files, process creation, per-pass calls, and operation-wide
-  calls are bounded;
+- command length, wall time, CPU time, output bytes, open files, process creation, and per-pass calls are bounded;
 - the model can read shared clone history, objects, refs, and branches through the Git metadata root;
 - prompts additionally prohibit executing repository code, package managers, language runtimes, tests, or builds.
 
@@ -252,9 +251,16 @@ tool accepts optional per-operation overrides; the runtime validates, deduplicat
 selection so later config changes cannot alter an in-flight operation. The resolved `min_severity` and whether it came
 from config or an override are persisted the same way.
 
-`[pr_review.limits]` bounds per-pass and operation-wide Bash calls, output tokens, matrix size, model concurrency,
-prepared repository size, command timeout, model retries, and retry delays. The operation-wide tool counter is
-persisted so recovery cannot reset it. Every Bash result reports the remaining budget.
+`[pr_review.reasoning_effort]` sets one effort per role: `review` for every reviewer, and `deliberation` and
+`aggregation`, each defaulting to `medium`. Effort is configuration only; the start tool does not override it.
+At start, each selected model receives its role's effort when its catalog spec accepts one and none otherwise, and that
+per-model resolution is persisted with the model selection. The provider remains the authority on which levels a model
+supports.
+
+`[pr_review.limits]` bounds per-pass Bash calls, matrix size, model concurrency, prepared repository size, command
+timeout, model retries, and retry delays. Every Bash result reports the remaining budget. Model output is deliberately
+uncapped: localmcplib requests each model's maximum, because a response truncated mid-reasoning must be repeated
+anyway.
 
 Langfuse is optional and environment-configured. It requires `LOCALMCP_LANGFUSE_ENABLED=true`,
 `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_SECRET_KEY`; the client is always installed. Langfuse

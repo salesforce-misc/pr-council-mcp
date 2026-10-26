@@ -28,7 +28,13 @@ from unittest.mock import AsyncMock
 import pytest
 from localmcp.llm import DEFAULT_MODEL_REGISTRY, ModelConfigurationError
 
-from pr_council.config import Config, PRReviewConfig, PRReviewLimitsConfig, PRReviewModelsConfig
+from pr_council.config import (
+    Config,
+    PRReviewConfig,
+    PRReviewLimitsConfig,
+    PRReviewModelsConfig,
+    PRReviewReasoningEffortConfig,
+)
 from pr_council.review.models import (
     OperationStatus,
     ReviewContextInput,
@@ -150,8 +156,11 @@ async def test_start_snapshots_arbitrary_context_and_auto_followup_inherits_it(m
         )
         assert first.request["context"][0]["id"].startswith("context-")
         assert first.request["context"][0]["sha256"]
-        assert first.request["operation_tool_limit"] == 300
-        assert first.request["model_output_tokens_per_call"] == 8_000
+        assert "operation_tool_limit" not in first.request
+        assert "model_output_tokens_per_call" not in first.request
+        assert first.request["review_efforts"] == {"claude-opus-5-5": "medium", "gpt-6-sol": "medium"}
+        assert first.request["deliberation_effort"] == "medium"
+        assert first.request["aggregation_effort"] == "medium"
         assert first.request["concurrent_model_calls"] == 4
         assert first.request["source_tool_timeout_seconds"] == 30
         assert runtime.store is not None
@@ -434,6 +443,45 @@ async def test_start_snapshots_per_operation_model_overrides(monkeypatch, tmp_pa
         assert record.request["aggregation_model"] == "claude-haiku-4-5-20251001"
     finally:
         await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
+
+
+async def test_start_snapshots_each_role_effort_for_models_that_accept_one(monkeypatch, tmp_path):
+    config = Config(
+        pr_review=PRReviewConfig(
+            models=PRReviewModelsConfig(
+                quality=["claude-opus-5", "claude-haiku-4-5-20251001"],
+                security=["gpt-5.6"],
+                deliberation="claude-opus-5",
+                aggregation="claude-haiku-4-5-20251001",
+            ),
+            reasoning_effort=PRReviewReasoningEffortConfig(review="max", deliberation="high", aggregation="low"),
+        ),
+    )
+    runtime = _runtime(config, tmp_path / "state")
+    await asyncio.wait_for(runtime.start(), timeout=_TIMEOUT)
+    monkeypatch.setattr(runtime, "_spawn", lambda *args, **kwargs: None)
+    try:
+        record = await asyncio.wait_for(
+            runtime.start_operation(
+                pr_url="https://github.com/acme/repo/pull/7",
+                context=[],
+                mode=ReviewMode.INITIAL,
+                baseline_operation_id=None,
+                iterations=1,
+            ),
+            timeout=_TIMEOUT,
+        )
+    finally:
+        await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
+
+    # A model that takes no reasoning effort runs without one instead of failing the review.
+    assert record.request["review_efforts"] == {
+        "claude-opus-5": "max",
+        "claude-haiku-4-5-20251001": None,
+        "gpt-5.6": "max",
+    }
+    assert record.request["deliberation_effort"] == "high"
+    assert record.request["aggregation_effort"] is None
 
 
 async def test_start_snapshots_the_configured_or_overridden_min_severity(monkeypatch, tmp_path):

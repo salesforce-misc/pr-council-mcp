@@ -174,6 +174,17 @@ min_severity = "medium"
 
 Suppressed findings still appear in the preview, so the human approving publication can see what was held back.
 
+Reviewers, deliberation, and aggregation all run at `medium` reasoning effort. To change a role's effort (`low`,
+`medium`, `high`, `xhigh`, or `max`), configure:
+
+```toml
+[server.pr-council-mcp.pr_review.reasoning_effort]
+review = "high"
+```
+
+Each model in the role receives the effort if it accepts one; a model that takes none runs without it. The provider
+rejects a level that a model does not support.
+
 Secrets resolve from declared environment aliases first and the shared `localmcp` OS-keyring service second. The
 native backend resolves `openai_api_key` and `anthropic_api_key` as required by the selected models. GitHub
 authentication is owned by `gh`, using the host-specific credentials described above. Secret values are never logged.

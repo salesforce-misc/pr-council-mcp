@@ -118,8 +118,7 @@ class ReviewerState(TypedDict, total=False):
     context_changes: list[dict[str, Any]]
     prior_findings: list[dict[str, Any]]
     iterations: int
-    operation_tool_limit: int
-    model_output_tokens_per_call: int
+    reasoning_effort: str | None
     source_tool_timeout_seconds: float
     iteration: int
     candidate: dict[str, Any]
@@ -183,12 +182,6 @@ class ReviewGraphDeps:
         if await self.store.is_cancel_requested(operation_id):
             raise ReviewCancelled
 
-    def tool_budget(self, operation_id: str, local_limit: int, operation_limit: int) -> ToolBudget:
-        async def claim_operation_call() -> int | None:
-            return await self.store.claim_tool_call(operation_id, operation_limit)
-
-        return ToolBudget(local_limit, claim_operation_call)
-
 
 def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
     reviewer_builder = StateGraph(ReviewerState, output_schema=ReviewerOutput)
@@ -208,15 +201,9 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         failed_tool_calls = 0
         for attempt in range(max_attempts):
             attempts_made += 1
-            # Fresh local budget per attempt: ToolBudget.claim() only increments, so
-            # reusing one instance would leave a retry pre-charged and prematurely
-            # exhausted. The operation-wide claim is durable (store-backed), so the
-            # cross-attempt operation limit is still enforced.
-            tool_budget = deps.tool_budget(
-                operation_id,
-                deps.config.pr_review.limits.reviewer_tool_calls_per_iteration,
-                state["operation_tool_limit"],
-            )
+            # Fresh budget per attempt: ToolBudget.claim() only increments, so reusing
+            # one instance would leave a retry pre-charged and prematurely exhausted.
+            tool_budget = ToolBudget(limits.reviewer_tool_calls_per_iteration)
             try:
                 with deps.telemetry.span(
                     "pr_review.reviewer",
@@ -230,7 +217,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                 ) as observation:
                     model_owner = deps.model_factory.create(
                         model_id=job["model"],
-                        max_output_tokens=state["model_output_tokens_per_call"],
+                        reasoning_effort=state.get("reasoning_effort"),
                     )
                     async with model_owner as model:
                         agent = ReviewerAgent(
@@ -257,9 +244,8 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                             usage_callback=usage_callback,
                             langfuse_callback=deps.telemetry.langchain_callback(),
                         )
-                    # Fold in tool calls charged by earlier transiently-failed attempts:
-                    # the operation-wide store already billed them, so the successful
-                    # result must report them too or node telemetry underreports usage.
+                    # Fold in tool calls made by earlier transiently-failed attempts so
+                    # node telemetry reports the review's total source-tool use.
                     total_tool_calls = usage.tool_calls + failed_tool_calls
                     observation.update(
                         usage_details={
@@ -571,8 +557,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                     ],
                     "context_changes": state.get("context_changes", []),
                     "iterations": request["iterations"],
-                    "operation_tool_limit": request["operation_tool_limit"],
-                    "model_output_tokens_per_call": request["model_output_tokens_per_call"],
+                    "reasoning_effort": request.get("review_efforts", {}).get(job["model"]),
                     "source_tool_timeout_seconds": request.get(
                         "source_tool_timeout_seconds",
                         deps.config.pr_review.limits.source_tool_timeout_seconds,
@@ -642,23 +627,17 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         model_id = state["request"]["deliberation_model"]
         limits = deps.config.pr_review.limits
         # Shared across outer retries so token spend and source-tool calls from an attempt that re-raises a
-        # transient error are still reported; the durable operation budget has already charged those calls.
+        # transient error are still reported.
         deliberation_usage = Usage()
 
         async def run_deliberation() -> Any:
-            # Allocate a fresh local budget per attempt: ToolBudget.claim() only ever
+            # Allocate a fresh budget per attempt: ToolBudget.claim() only ever
             # increments, so reusing one instance across call_with_rate_limit_retry
-            # attempts would leave a retry pre-charged and prematurely exhausted. The
-            # operation-wide claim is durable (store-backed by operation_id), so the
-            # cross-attempt operation limit is still enforced.
-            tool_budget = deps.tool_budget(
-                state["operation_id"],
-                deps.config.pr_review.limits.deliberator_tool_calls_per_disposition,
-                state["request"]["operation_tool_limit"],
-            )
+            # attempts would leave a retry pre-charged and prematurely exhausted.
+            tool_budget = ToolBudget(limits.deliberator_tool_calls_per_disposition)
             model_owner = deps.model_factory.create(
                 model_id=model_id,
-                max_output_tokens=state["request"]["model_output_tokens_per_call"],
+                reasoning_effort=state["request"].get("deliberation_effort"),
             )
             async with model_owner as model:
                 return await deliberate(
@@ -876,7 +855,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         async def run_aggregation() -> Any:
             model_owner = deps.model_factory.create(
                 model_id=model_id,
-                max_output_tokens=state["request"]["model_output_tokens_per_call"],
+                reasoning_effort=state["request"].get("aggregation_effort"),
             )
             async with model_owner as model:
                 return await aggregate(

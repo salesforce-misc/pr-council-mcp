@@ -1,5 +1,3 @@
-import asyncio
-
 import aiosqlite
 import pytest
 
@@ -90,34 +88,21 @@ async def test_operation_lease_prevents_two_workers_from_claiming_the_same_graph
     await second.close()
 
 
-async def test_operation_tool_budget_is_atomic_and_persisted(tmp_path):
+async def test_catalog_with_the_retired_tool_call_counter_still_opens(tmp_path):
     path = tmp_path / "operations.sqlite3"
-    first = await OperationStore.open(path)
-    second = await OperationStore.open(path)
-    await first.create(
-        operation_id="operation-1",
-        owner_uid=123,
-        repo_key="github.com/acme/repo",
-        pr_number=7,
-        label="PR #7",
-        request={},
-        parent_operation_id=None,
+    store = await OperationStore.open(path)
+    await store.connection.execute(
+        "ALTER TABLE review_operations ADD COLUMN tool_calls_used INTEGER NOT NULL DEFAULT 0"
     )
-    claims = await asyncio.gather(
-        *(first.claim_tool_call("operation-1", 5) for _ in range(5)),
-        *(second.claim_tool_call("operation-1", 5) for _ in range(5)),
-    )
-    assert sorted(result for result in claims if result is not None) == [0, 1, 2, 3, 4]
-    assert sum(result is not None for result in claims) == 5
-    await first.close()
-    await second.close()
+    await store.connection.commit()
+    await store.close()
 
     reopened = await OperationStore.open(path)
+    await _seed(reopened)
     record = await reopened.get("operation-1")
-    assert record is not None
-    assert record.tool_calls_used == 5
-    assert await reopened.claim_tool_call("operation-1", 5) is None
     await reopened.close()
+    assert record is not None
+    assert record.status == OperationStatus.QUEUED
 
 
 async def test_require_owned_returns_record_for_owner_and_rejects_others(tmp_path):

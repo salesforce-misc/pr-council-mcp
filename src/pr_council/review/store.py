@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -39,7 +38,6 @@ class OperationRecord:
     updated_at: str
     lease_owner: str | None
     lease_expires: float | None
-    tool_calls_used: int
 
     @property
     def commit_ready(self) -> bool:
@@ -61,7 +59,6 @@ class OperationRecord:
 class OperationStore:
     def __init__(self, connection: aiosqlite.Connection):
         self.connection = connection
-        self._tool_call_lock = asyncio.Lock()
 
     @classmethod
     async def open(cls, path: Path) -> OperationStore:
@@ -101,7 +98,6 @@ class OperationStore:
               updated_at TEXT NOT NULL
               ,lease_owner TEXT
               ,lease_expires REAL
-              ,tool_calls_used INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -112,10 +108,6 @@ class OperationStore:
             await self.connection.execute("ALTER TABLE review_operations ADD COLUMN lease_owner TEXT")
         if "lease_expires" not in columns:
             await self.connection.execute("ALTER TABLE review_operations ADD COLUMN lease_expires REAL")
-        if "tool_calls_used" not in columns:
-            await self.connection.execute(
-                "ALTER TABLE review_operations ADD COLUMN tool_calls_used INTEGER NOT NULL DEFAULT 0"
-            )
         await self.connection.execute(
             "CREATE INDEX IF NOT EXISTS review_operations_target ON review_operations(repo_key, pr_number, created_at)"
         )
@@ -220,29 +212,6 @@ class OperationStore:
         row = await cursor.fetchone()
         return bool(row and row[0])
 
-    async def claim_tool_call(self, operation_id: str, limit: int) -> int | None:
-        """Atomically reserve a call and return operation capacity remaining."""
-        async with self._tool_call_lock:
-            async with self.connection.execute(
-                """
-                UPDATE review_operations
-                SET tool_calls_used = tool_calls_used + 1, updated_at = ?
-                WHERE id = ? AND tool_calls_used < ?
-                """,
-                (_now(), operation_id, limit),
-            ) as cursor:
-                claimed = cursor.rowcount == 1
-            if not claimed:
-                await self.connection.commit()
-                return None
-            async with self.connection.execute(
-                "SELECT tool_calls_used FROM review_operations WHERE id = ?", (operation_id,)
-            ) as cursor:
-                row = await cursor.fetchone()
-            await self.connection.commit()
-            assert row is not None
-            return limit - int(row[0])
-
     async def claim(self, operation_id: str, worker_id: str, *, lease_seconds: float = 90.0) -> bool:
         now = time.time()
         cursor = await self.connection.execute(
@@ -316,5 +285,4 @@ def _record(row: aiosqlite.Row) -> OperationRecord:
         updated_at=row["updated_at"],
         lease_owner=row["lease_owner"],
         lease_expires=row["lease_expires"],
-        tool_calls_used=row["tool_calls_used"],
     )
