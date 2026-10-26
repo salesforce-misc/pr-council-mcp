@@ -94,28 +94,28 @@ The Makefile wraps review, judging, and reporting. These targets call the config
 are never part of `make ci`:
 
 ```sh
-make eval REVIEWBENCH=../ReviewBench                                # the 10-PR subset
+make eval REVIEWBENCH=../ReviewBench                                # the 25-PR test set
 make eval EVAL_RUN=my-change EVAL_BASELINE=previous-run             # name the run; compare with an earlier one
-make eval EVAL_PRS="3 5 16 21"                                      # other test-set indices
 make eval-pr EVAL_RUN=my-change EVAL_BASELINE=previous-run          # only EVAL_PR, for quick iteration
-make eval-full                                                      # the whole set
+make eval EVAL_PRS="3 5 16 21"                                      # chosen test-set indices
+make eval EVAL_SET=full                                             # all 219 PRs
 make eval-report EVAL_RUN=my-change EVAL_BASELINE="run-a run-b"     # report judged runs again
 ```
 
-`eval` reviews the `EVAL_PRS` indices of `EVAL_SET` (default `test`), judges the findings stage, and reports. The
-default subset is fixed so that consecutive runs compare the same pull requests. Change the `EVAL_PRS` default in the
-Makefile when a full run shows behavior the subset doesn't exercise. The run still gets judged and reported when some
-pull requests fail or are degraded, but `make` then exits nonzero.
+`eval` reviews the whole of `EVAL_SET` (default `test`), or only its `EVAL_PRS` indices when set, judges the findings
+stage, and reports. The run still gets judged and reported when some pull requests fail or are degraded, but `make`
+then exits nonzero.
 
-`eval-pr` runs `eval` on `EVAL_PR` alone: the pull request the system currently handles worst, which makes a cheap
-first check of a change. One pull request is a noisy signal, so confirm a gain on the subset before relying on it, and
-change the default when another pull request becomes the weakest.
+The test set is the baseline: its per-PR results show where the system falls short. `eval-pr` runs `eval` on `EVAL_PR`
+alone, the pull request the system currently handles worst, which makes a cheap targeted check while tuning. One pull
+request is a noisy signal, so confirm a gain on the test set before relying on it, and change the default when another
+pull request becomes the weakest.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `REVIEWBENCH` | `../ReviewBench` | ReviewBench checkout |
 | `EVAL_SET` | `test` | `test` (25 PRs) or `full` (219 PRs) |
-| `EVAL_PRS` | `4 9 11 18 19 20 21 22 23 24` | set indices; empty for the whole set |
+| `EVAL_PRS` | none | set indices to review instead of the whole set |
 | `EVAL_PR` | `12` | the single set index `eval-pr` reviews |
 | `EVAL_RUN` | UTC timestamp | directory name beneath `runs/` |
 | `EVAL_BASELINE` | none | earlier run names to compare against, by name beneath `runs/` |
