@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import pr_council.tools.review as review_tool
-from pr_council.review.models import OperationStatus, ReviewContextInput, ReviewMode, ReviewSourceMode
+from pr_council.review.models import OperationStatus, ReviewContextInput, ReviewMode, ReviewSourceMode, Severity
 
 
 async def test_get_review_surfaces_structured_reviewer_failures(monkeypatch):
@@ -136,6 +136,7 @@ async def test_start_forwards_params_to_runtime_and_maps_record(monkeypatch):
         iterations=5,
         deliberation_model="delib-model",
         aggregation_model="agg-model",
+        min_severity=Severity.MEDIUM,
     )
 
     assert result == {"operation_id": "operation-7", "label": "PR #7", "status": "queued"}
@@ -152,6 +153,7 @@ async def test_start_forwards_params_to_runtime_and_maps_record(monkeypatch):
         "iterations": 5,
         "deliberation_model": "delib-model",
         "aggregation_model": "agg-model",
+        "min_severity": Severity.MEDIUM,
     }
 
 

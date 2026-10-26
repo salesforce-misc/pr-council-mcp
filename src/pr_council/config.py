@@ -8,6 +8,7 @@ from localmcp.config import ServerConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from pr_council.errors import PrCouncilError
+from pr_council.review.models import Severity
 
 SERVER_NAME = "pr-council-mcp"
 _MODEL_ID = re.compile(r"^[A-Za-z0-9._:/-]+$")
@@ -25,7 +26,7 @@ class PRReviewLimitsConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     reviewer_tool_calls_per_iteration: int = Field(default=12, ge=1, le=20)
-    deliberator_tool_calls_per_disposition: int = Field(default=8, ge=1, le=20)
+    deliberator_tool_calls_per_disposition: int = Field(default=20, ge=1, le=20)
     operation_tool_calls: int = Field(default=300, ge=1, le=1_000)
     model_output_tokens_per_call: int = Field(default=8_000, ge=256, le=32_000)
     models_per_disposition: int = Field(default=10, ge=1, le=10)
@@ -81,6 +82,8 @@ class PRReviewConfig(BaseModel):
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS), min_length=1, max_length=20)
     models: PRReviewModelsConfig = Field(default_factory=PRReviewModelsConfig)
     limits: PRReviewLimitsConfig = Field(default_factory=PRReviewLimitsConfig)
+    # Findings below this severity are listed in the preview but never published.
+    min_severity: Severity = Severity.INFO
     # gh account per "host", "host/owner", or "host/owner/repo"; the most specific match wins.
     github_accounts: dict[str, str] = Field(default_factory=dict, max_length=100)
 

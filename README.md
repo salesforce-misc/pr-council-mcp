@@ -17,9 +17,9 @@ workflows, model coordination, sandboxed tools, secrets, human approval, and obs
 a small footprint: one stdio MCP server backed by SQLite, without a service stack to deploy.
 
 The concrete application is multi-model review of GitHub pull requests. Independent quality and security reviewers
-inspect a PR, deliberate over their findings, and combine retained issues into a preview. The calling agent shows that
-preview to a human; only after explicit approval does the server publish inline comments and a `COMMENT`-only summary
-to GitHub.
+inspect a PR, deliberate over their findings to remove disproven claims and correct overstated ones, and combine the
+remaining issues into a preview. The calling agent shows that preview to a human; only after explicit approval does
+the server publish inline comments and a `COMMENT`-only summary to GitHub.
 
 > **Status: early development (alpha).** The design, tool surface, and configuration are still changing and may
 > break between versions. Expect rough edges, and expect the interfaces to evolve as both tracks are explored.
@@ -125,9 +125,9 @@ Inspect the MCP server's tool schema for complete arguments and return models.
 
 | Tool | What it does | Important behavior and requirements |
 | --- | --- | --- |
-| `pr_council_start` | Starts a durable initial or follow-up PR review and returns an opaque operation ID. | Accepts a GitHub PR URL, source mode, finalized context, review mode, optional baseline, iterations, and optional model overrides. It never publishes comments. |
+| `pr_council_start` | Starts a durable initial or follow-up PR review and returns an opaque operation ID. | Accepts a GitHub PR URL, source mode, finalized context, review mode, optional baseline, iterations, and optional model and `min_severity` overrides. It never publishes comments. |
 | `pr_council_get` | Polls review status, progress, failures, and completion data. | The calling agent retains the operation ID and polls until the review is ready, terminal, or needs action. |
-| `pr_council_preview` | Returns the exact revision-bound summary and inline comments. | Read-only. The calling agent presents this payload for human review without changing it. |
+| `pr_council_preview` | Returns the exact revision-bound summary and inline comments. | Read-only. The calling agent presents this payload for human review without changing it. Findings below `min_severity` are listed separately with a note; they are never published. |
 | `pr_council_commit` | Publishes one approved preview as inline comments plus a `COMMENT`-only summary. | Requires the preview revision and payload hash, revalidates the PR endpoints and authenticated GitHub user, and never approves or rejects the PR. |
 | `pr_council_cancel` | Requests cooperative cancellation of one owned operation. | Cancellation is unavailable once publication has begun. |
 
@@ -163,6 +163,16 @@ A mapped review gets that account's token from `gh auth token --user` for each G
 `GH_TOKEN`-style variables, and fetches over HTTPS with `gh` as the Git credential helper. Nothing changes `gh`'s
 active account, so concurrent reviews can use different identities. Starting a review fails immediately if the
 account's token authenticates as someone else, and publication uses the account recorded when the review started.
+
+Every finding is published by default. To publish only findings at or above a severity (`info`, `low`, `medium`,
+`high`, or `critical`), configure a threshold; `pr_council_start` also accepts `min_severity` for one review:
+
+```toml
+[server.pr-council-mcp.pr_review]
+min_severity = "medium"
+```
+
+Suppressed findings still appear in the preview, so the human approving publication can see what was held back.
 
 Secrets resolve from declared environment aliases first and the shared `localmcp` OS-keyring service second. The
 native backend resolves `openai_api_key` and `anthropic_api_key` as required by the selected models. GitHub
