@@ -100,6 +100,7 @@ class GraphState(TypedDict, total=False):
     prior_assessments: list[dict[str, Any]]
     aggregation: dict[str, Any]
     aggregation_usage: dict[str, Any]
+    aggregation_incomplete: bool
     preview: dict[str, Any]
     decision: dict[str, Any]
     final_status: str
@@ -727,6 +728,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         finding_ids = {str(finding["id"]) for finding in findings}
         supplied_finding_decisions = candidate.finding_decisions
         supplied_assessment_decisions = candidate.assessment_decisions
+        undecided = finding_ids - {decision.finding_id for decision in supplied_finding_decisions}
         candidate = candidate.model_copy(
             update={
                 "finding_decisions": reconcile_finding_decisions(supplied_finding_decisions, findings),
@@ -763,6 +765,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             model=model_id,
             finding_decisions=candidate.finding_decisions,
             assessment_decisions=candidate.assessment_decisions,
+            undecided_findings=len(undecided),
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             total_tokens=usage.total_tokens,
@@ -857,6 +860,18 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         # Shared across outer retries so token spend from an attempt that re-raises
         # a transient error is preserved rather than discarded with the exception.
         aggregation_usage = Usage()
+        incomplete = False
+
+        def on_incomplete(exc: Exception) -> None:
+            # A failure after some merges keeps them; the preview then says that merging may be incomplete.
+            nonlocal incomplete
+            incomplete = True
+            log.warning(
+                "review.aggregation_incomplete",
+                operation_id=state["operation_id"],
+                model=model_id,
+                error_type=type(exc).__name__,
+            )
 
         async def run_aggregation() -> Any:
             model_owner = deps.model_factory.create(
@@ -873,12 +888,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                     context=state["context"],
                     usage=aggregation_usage,
                     langfuse_callback=deps.telemetry.langchain_callback(),
-                    on_incomplete=lambda exc: log.warning(
-                        "review.aggregation_incomplete",
-                        operation_id=state["operation_id"],
-                        model=model_id,
-                        error_type=type(exc).__name__,
-                    ),
+                    on_incomplete=on_incomplete,
                 )
 
         with deps.telemetry.span(
@@ -921,6 +931,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             "prior_assessments": assessments,
             "aggregation": normalized.model_dump(mode="json"),
             "aggregation_usage": usage.model_dump(),
+            "aggregation_incomplete": incomplete,
             "timing": timing,
         }
 
@@ -1029,7 +1040,12 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                 summary_body=preview.summary_body,
                 comments=preview.comments,
             )
-        suppressed_ids = {finding.id for finding in preview.suppressed_findings}
+        # A follow-up tracks only what was published, so suppressed findings never become baseline findings. An
+        # unresolved prior finding was published by an earlier review, so it stays tracked even when suppressed here.
+        carried = _carried_finding_ids(state.get("prior_assessments", []))
+        untracked_ids = {
+            finding.id for finding in preview.suppressed_findings if carried.isdisjoint(finding.source_finding_ids)
+        }
         result = {
             "operation_id": state["operation_id"],
             "status": OperationStatus.COMPLETED.value,
@@ -1040,10 +1056,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             "mode": state["mode"],
             "baseline_operation_id": state.get("baseline_operation_id"),
             "context": state["context"],
-            # A follow-up tracks only what was published, so suppressed findings never become baseline findings.
-            "findings": [
-                finding for finding in state["aggregation"]["findings"] if finding["id"] not in suppressed_ids
-            ],
+            "findings": [finding for finding in state["aggregation"]["findings"] if finding["id"] not in untracked_ids],
             "prior_assessments": state.get("prior_assessments", []),
             "summary": preview.summary,
             "metrics": preview.metrics.model_dump(mode="json"),
@@ -1133,6 +1146,10 @@ def _carried_finding_id(assessment: dict[str, Any]) -> str:
     return hashlib.sha256(material.encode()).hexdigest()[:20]
 
 
+def _carried_finding_ids(assessments: list[dict[str, Any]]) -> set[str]:
+    return {_carried_finding_id(item) for item in assessments if item["status"] in _UNRESOLVED_STATUSES}
+
+
 def _merge_assessments(assessments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rank = {"resolved": 0, "cannot_verify": 1, "partially_resolved": 2, "still_present": 3}
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -1217,8 +1234,11 @@ def _build_preview(state: GraphState) -> ReviewPreview:
             status: sum(item["status"] == status for item in prior_assessments)
             for status in ("resolved", "still_present", "partially_resolved", "cannot_verify")
         }
-        carried = {_carried_finding_id(item) for item in prior_assessments if item["status"] in _UNRESOLVED_STATUSES}
+        carried = _carried_finding_ids(prior_assessments)
         follow_counts["new"] = sum(carried.isdisjoint(finding.source_finding_ids) for finding in published)
+        follow_counts["unresolved_suppressed"] = sum(
+            not carried.isdisjoint(finding.source_finding_ids) for finding in suppressed
+        )
     metrics = ReviewMetrics(
         models=request["models"],
         findings=findings_by_model,
@@ -1315,6 +1335,17 @@ def _build_preview(state: GraphState) -> ReviewPreview:
         coverage_warning = (
             "\n\n> ⚠️ **Review coverage degraded:** the following reviewer jobs failed after retries: "
             f"{failed_jobs}. Findings do not include their independent analysis."
+        )
+    if undecided := sum(result.undecided_findings for result in deliberations):
+        noun = "finding was" if undecided == 1 else "findings were"
+        coverage_warning += (
+            f"\n\n> ⚠️ **Deliberation incomplete:** {undecided} {noun} not deliberated and "
+            "kept as the reviewers wrote them."
+        )
+    if state.get("aggregation_incomplete"):
+        coverage_warning += (
+            "\n\n> ⚠️ **Aggregation incomplete:** aggregation ended early, so findings that describe the same "
+            "defect may not all be merged."
         )
     summary = neutralize_github_markup(
         render_review_summary(published, follow_up=follow_counts) + extra + coverage_warning

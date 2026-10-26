@@ -400,13 +400,14 @@ async def review_pr(
         if status == OperationStatus.READY:
             snapshot = await runtime.graph.aget_state({"configurable": {"thread_id": record.id}})
             values = dict(snapshot.values)
+            # Checked before any judge input is written, so a failed check leaves nothing to judge.
+            if await _has_pi_resources(runtime.git, Path(values["repo_path"]), pr.head):
+                outcome["judge_hazard"] = ".pi/ at head"
+                _log(f"{pr.key}: head contains .pi/, which the judge's classifier would load; do not judge it")
             outcome["counts"] = write_outputs(paths, pr, record.id, values)
             failures = values["preview"].get("reviewer_failures", [])
             if failures:
                 outcome["reviewer_failures"] = [f"{failure['disposition']}/{failure['model']}" for failure in failures]
-            if await _has_pi_resources(runtime.git, Path(values["repo_path"]), pr.head):
-                outcome["judge_hazard"] = ".pi/ at head"
-                _log(f"{pr.key}: head contains .pi/, which the judge's classifier would load; do not judge it")
         else:
             outcome["error"] = (await runtime.get_owned(record.id)).error or f"operation ended as {status.value}"
     except Exception as exc:  # Recorded per PR so one failure does not abort the run.
@@ -417,9 +418,11 @@ async def review_pr(
             await runtime.cancel(record.id)
             await _wait(runtime, record.id, TERMINAL_STATUSES, 300)
         except (ReviewError, TimeoutError) as exc:
-            _log(f"{pr.key}: cleanup did not finish ({exc})")
-        if not keep_repos:
-            shutil.rmtree(repository_path(runtime.root / "repos", pr), ignore_errors=True)
+            # The operation may still be using its repository, so it is left in place.
+            _log(f"{pr.key}: cleanup did not finish ({exc}); keeping its repository")
+        else:
+            if not keep_repos:
+                shutil.rmtree(repository_path(runtime.root / "repos", pr), ignore_errors=True)
     # A degraded review ran without some of its configured reviewers, so it does not measure the configuration.
     outcome["status"] = "failed" if "counts" not in outcome else "degraded" if "reviewer_failures" in outcome else "ok"
     outcome["elapsed_s"] = round(time.monotonic() - began, 1)

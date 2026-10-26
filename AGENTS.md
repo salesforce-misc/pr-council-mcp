@@ -194,14 +194,17 @@ The deliberator and aggregator are recording agents: each decision, prior-findin
 tool call, validated as it arrives against a closed ID set, so no single response carries the whole result and a
 rejected call records nothing. When a response reaches the output limit, its final call is rejected for the model to
 record again; a response cut off before any call, or a deliberator reply that stops with IDs unrecorded, is answered
-with what remains, a bounded number of times. A deterministic failure keeps what was already recorded. The graph then
+with what remains, a bounded number of times. A deterministic failure keeps what was already recorded; a failure
+before anything is recorded, such as a rejected credential or model, fails the operation instead. The graph then
 closes deliberation over the supplied IDs: an undecided finding is kept as written and an unassessed prior finding
-becomes `cannot_verify`, both logged.
+becomes `cannot_verify`, both logged. The summary warns when findings went undeliberated or aggregation ended early.
 
 The top-level summary is rendered in code from counts of the published findings and follow-up assessments; no model
 writes it. `[pr_review].min_severity` (default `info`), or the start tool's per-operation override, sets the lowest
 severity that is published. Findings below it are listed in the preview with a suppression note and excluded from the
-comments, summary, payload hash, and the completed result that later follow-ups use as their baseline.
+comments, summary counts, payload hash, and the completed result that later follow-ups use as their baseline. The
+exception is a suppressed finding that carries forward an unresolved prior finding: an earlier review published it,
+so it stays in that baseline, and the summary reports how many unresolved issues fall below the threshold.
 
 `auto` mode uses the latest completed review by the same local owner for the same PR as a baseline when available.
 `initial` forbids a baseline. `follow_up` requires one. Follow-ups compare context snapshots and require each relevant

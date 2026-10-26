@@ -60,7 +60,9 @@ npm ci --ignore-scripts
 `judge.py` runs ReviewBench's unmodified judge through the `openai_compatible` endpoint in your localmcp config,
 over OpenAI chat completions, with the `llm_api_key` secret. It resolves both at run time: the endpoint goes into a
 pi `models.json` in a private temporary directory that is removed afterwards, and the key reaches the judge only
-through its environment. Each stage is scored separately:
+through its environment. That environment is otherwise an allowlist of what node and npm need to run and reach the
+endpoint (`PATH`, `HOME`, locale, proxy, and CA-certificate variables), so the caller's tokens and other credentials
+never reach the judge's agent. Each stage is scored separately:
 
 ```sh
 uv run python evals/reviewbench/judge.py --reviewbench ../ReviewBench evals/reviewbench/runs/<run>

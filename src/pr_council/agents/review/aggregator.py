@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from pr_council.agents.review.common import BASE_SAFETY, Usage
 from pr_council.agents.review.recording import ClosedSet, Recorder, recording_tool, run_recording_agent
-from pr_council.review.models import AggregatedFinding, AggregationCandidate, Severity
+from pr_council.review.models import AggregatedFinding, AggregationCandidate
 
 _MERGE_TOOL = "merge_findings"
 
@@ -26,8 +26,6 @@ appearing only in baselineFindings or priorFindingAssessments are context identi
 not create a new issue. Keep each merged body concise but actionable and able to stand alone if the finding cannot be
 posted inline. When every merge is recorded, or if no findings overlap, reply with a short confirmation and no tool
 calls."""
-
-_SEVERITY_ORDER = list(Severity)
 
 
 class FindingMerge(BaseModel):
@@ -73,10 +71,14 @@ class _MergeRecorder(Recorder):
             return None
         return f"Record any remaining merges with `{_MERGE_TOOL}`, a few per turn, or reply briefly if none remain."
 
+    def has_records(self) -> bool:
+        return bool(self.merges)
+
     def candidate(self) -> AggregationCandidate:
         """Return every finding once, in input order, with each merge at the position of its first member.
 
-        IDs and attribution are derived from the source findings during graph validation.
+        A merge carries its first member's severity as a placeholder: IDs, severity, and attribution are derived from
+        the source findings during graph validation.
         """
         findings: list[AggregatedFinding] = []
         emitted: set[int] = set()
@@ -102,10 +104,7 @@ class _MergeRecorder(Recorder):
                         id=source_id,
                         title=merge.title,
                         body=merge.body,
-                        severity=max(
-                            (Severity(self._findings[i]["severity"]) for i in merge.source_finding_ids),
-                            key=_SEVERITY_ORDER.index,
-                        ),
+                        severity=source["severity"],
                         path=merge.path,
                         line=merge.line,
                         source_finding_ids=merge.source_finding_ids,

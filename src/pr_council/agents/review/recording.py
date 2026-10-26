@@ -108,6 +108,10 @@ class Recorder(ABC):
     def remaining(self) -> str | None:
         """Tell the model what it can still record, or return None when nothing remains."""
 
+    @abstractmethod
+    def has_records(self) -> bool:
+        """Whether anything has been recorded, which a failed run can keep."""
+
 
 class RecordingMiddleware(AgentMiddleware[AgentState[Any], Any, Any]):
     """Keep a recording run going after a turn that was cut off, stopped early, or whose tool calls did not parse.
@@ -194,8 +198,9 @@ async def run_recording_agent(
 
     Transient transport and API faults (429, 5xx, connection, timeout) propagate to the caller's
     call_with_rate_limit_retry for reset-aware backoff. Any other failure ends the run with what was already recorded
-    and goes to ``on_incomplete``. Token usage and ``tool_budget`` calls accumulate into ``usage`` either way, so
-    spend from an attempt that re-raises is still reported when the caller retries with the same accumulator.
+    and goes to ``on_incomplete``. A failure before anything was recorded, such as a rejected credential or model, has
+    nothing to keep and propagates as well. Token usage and ``tool_budget`` calls accumulate into ``usage`` either way,
+    so spend from an attempt that re-raises is still reported when the caller retries with the same accumulator.
     """
     # Unforced tools, as for the reviewers: forced tool_choice is not supported by every model and gateway.
     agent = create_agent(
@@ -218,7 +223,7 @@ async def run_recording_agent(
     try:
         await agent.ainvoke({"messages": [HumanMessage(content=json.dumps(payload))]}, config=config)
     except Exception as exc:
-        if is_retryable_error(exc):
+        if is_retryable_error(exc) or not recorder.has_records():
             raise
         if on_incomplete is not None:
             on_incomplete(exc)

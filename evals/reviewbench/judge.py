@@ -5,7 +5,8 @@
 The judge is ReviewBench's own, unmodified code. It reaches the ``openai_compatible`` endpoint from the shared
 localmcp config over OpenAI chat completions, authenticated with the ``llm_api_key`` secret. Both are resolved at
 run time: the endpoint goes into a pi ``models.json`` in a private temporary directory that is removed afterwards,
-and the key reaches the judge only through its environment.
+and the key reaches the judge only through its environment. That environment is otherwise limited to what node and
+npm need, so the caller's tokens and other credentials never reach the judge's agent.
 
 Each stage is scored separately into ``scoring/<stage>/`` beneath the run directory.
 """
@@ -34,6 +35,29 @@ STAGES = {
 }
 _PROVIDER = "localmcp-gateway"
 _KEY_ENV = "REVIEWBENCH_JUDGE_API_KEY"
+# The judge's classifier runs an agent over third-party repository content, so its environment holds only what node
+# and npm need to run and reach the gateway, never the caller's tokens or other credentials.
+_JUDGE_ENV = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "LANG",
+        "TERM",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NODE_EXTRA_CA_CERTS",
+    }
+)
 _METRICS = ("grounded_precision", "grounded_recall", "augmented_precision", "augmented_recall")
 
 
@@ -63,6 +87,12 @@ def pi_models(base_url: str, model: str) -> dict[str, Any]:
             }
         }
     }
+
+
+def judge_env(env: Mapping[str, str], agent_dir: str, key: str) -> dict[str, str]:
+    """Return the judge's environment: the allowlisted caller variables, its pi agent directory, and the key."""
+    allowed = {name: value for name, value in env.items() if name in _JUDGE_ENV or name.startswith("LC_")}
+    return {**allowed, "PI_CODING_AGENT_DIR": agent_dir, _KEY_ENV: key}
 
 
 def hazardous_inputs(run_dir: Path, stage_dir: Path) -> list[str]:
@@ -100,13 +130,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if hazards:
             raise SystemExit(f"{stage}: remove {', '.join(hazards)} first; their heads contain .pi/")
 
-    env = dict(os.environ)
-    base_url, key = gateway(env)
+    base_url, key = gateway(dict(os.environ))
     summaries: dict[str, str] = {}
     failed = False
     with tempfile.TemporaryDirectory(prefix="reviewbench-judge-") as agent_dir:
         (Path(agent_dir) / "models.json").write_text(json.dumps(pi_models(base_url, args.model)), encoding="utf-8")
-        env.update({"PI_CODING_AGENT_DIR": agent_dir, _KEY_ENV: key})
+        env = judge_env(os.environ, agent_dir, key)
         for stage in stages:
             candidates = run_dir / STAGES[stage]
             if not any(candidates.glob("*.json")):

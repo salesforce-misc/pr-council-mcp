@@ -256,6 +256,11 @@ def test_render_review_summary_counts_blocking_initial_findings(severities, expe
             "3 new issues were found.",
         ),
         ({"new": 0}, "No issues were previously reported. No new issues were found."),
+        (
+            {"still_present": 2, "unresolved_suppressed": 1, "new": 0},
+            "No previously reported issues were resolved; 2 remain unresolved. 1 of them is below this review's "
+            "severity threshold and not repeated. No new issues were found.",
+        ),
     ],
 )
 def test_render_review_summary_reports_follow_up_status_counts(counts, expected):

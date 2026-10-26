@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage
 
 from pr_council.agents.review.aggregator import aggregate
 from pr_council.agents.review.common import Usage
+from pr_council.agents.review.recording import OutputLimitError
 from pr_council.review.models import AggregatedFinding, AggregationCandidate, Severity
 
 
@@ -106,7 +107,6 @@ async def test_a_merge_takes_the_position_of_its_first_member(scripted_model):
     merged, unmerged = candidate.findings
     assert (merged.title, merged.body, merged.path, merged.line) == ("Merged title", "Merged body.", "app.py", 5)
     assert merged.source_finding_ids == ["c", "a"]
-    assert merged.severity == Severity.HIGH
     assert unmerged.source_finding_ids == ["b"]
     assert _tool_replies(model.requests[1])["m1"].content == (
         "Merged 2 findings. 1 unmerged findings will be published as written."
@@ -257,13 +257,33 @@ async def test_a_deterministic_failure_keeps_the_merges_already_recorded(scripte
     assert [str(exc) for exc in incomplete] == ["context too long"]
 
 
-async def test_a_run_that_never_finishes_ends_at_the_recursion_limit(scripted_model):
-    model = scripted_model(*(_merge(["a", "unknown"], call_id=f"m{index}") for index in range(60)))
+@pytest.mark.parametrize(
+    ("replies", "error"),
+    [
+        ([RuntimeError("authentication failed")], RuntimeError),
+        ([AIMessage(content="", response_metadata={"stop_reason": "max_tokens"}) for _ in range(3)], OutputLimitError),
+    ],
+)
+async def test_a_failure_before_any_merge_is_recorded_propagates(scripted_model, replies, error):
+    # A rejected credential or model fails on the first call; keeping nothing would hide it behind a normal preview.
+    model = scripted_model(*replies)
     incomplete: list[Exception] = []
 
-    candidate, _usage = await _aggregate(model, on_incomplete=incomplete.append)
+    with pytest.raises(error):
+        await _aggregate(model, on_incomplete=incomplete.append)
 
-    assert [finding.source_finding_ids for finding in candidate.findings] == [["a"], ["b"]]
+    assert incomplete == []
+
+
+async def test_a_run_that_never_finishes_ends_at_the_recursion_limit(scripted_model):
+    findings = [_finding("a"), _finding("b"), _finding("c", line=3)]
+    rejected = (_merge(["c", "unknown"], line=3, call_id=f"m{index}") for index in range(60))
+    model = scripted_model(_merge(["a", "b"]), *rejected)
+    incomplete: list[Exception] = []
+
+    candidate, _usage = await _aggregate(model, findings=findings, on_incomplete=incomplete.append)
+
+    assert [finding.source_finding_ids for finding in candidate.findings] == [["a", "b"], ["c"]]
     assert [type(exc).__name__ for exc in incomplete] == ["GraphRecursionError"]
 
 

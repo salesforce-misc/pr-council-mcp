@@ -212,6 +212,17 @@ async def test_a_deterministic_failure_keeps_what_was_recorded(scripted_model, t
     assert [str(exc) for exc in incomplete] == ["context too long"]
 
 
+async def test_a_failure_before_anything_is_recorded_propagates(scripted_model, tmp_path):
+    # Source inspection alone records nothing, so there is no deliberation to keep.
+    model = scripted_model(_turn(_call("Bash", "bash-1", command="git status")), RuntimeError("model not found"))
+    incomplete: list[Exception] = []
+
+    with pytest.raises(RuntimeError, match="model not found"):
+        await _deliberate(model, root=tmp_path, on_incomplete=incomplete.append)
+
+    assert incomplete == []
+
+
 async def test_source_tool_calls_and_usage_survive_a_retryable_error(scripted_model, tmp_path):
     first = _turn(_call("Bash", "bash-1", command="git status"), _decide("a"))
     first.usage_metadata = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}

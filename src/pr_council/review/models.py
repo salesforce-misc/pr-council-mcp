@@ -178,6 +178,8 @@ class DeliberationResult(BaseModel):
     model: str
     finding_decisions: list[FindingDecision] = Field(default_factory=list)
     assessment_decisions: list[AssessmentDecision] = Field(default_factory=list)
+    #: Findings the deliberator never decided, which are kept as the reviewers wrote them.
+    undecided_findings: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0

@@ -5,9 +5,9 @@
 Only the findings stage, the final aggregated findings, is comparable with the leaderboard.
 
 The leaderboard ranks by grounded F1, the harmonic mean of grounded precision and recall. Micro figures pool every
-judged candidate; macro figures average per pull request. A failed pull request has no findings and is not judged, so
-it drops out of a run's figures rather than counting as a miss. With more than one run, the comparison repeats the
-figures over only the pull requests judged in every run.
+judged candidate; macro figures average per pull request over those where the metric is defined. A failed pull
+request has no findings and is not judged, so it drops out of a run's figures rather than counting as a miss. With
+more than one run, the comparison repeats the figures over only the pull requests judged in every run.
 """
 
 from __future__ import annotations
@@ -36,16 +36,18 @@ def _line(name: str, per_pr: dict[str, Any], keys: Sequence[str]) -> str:
     def total(field: str) -> int:
         return sum(int(row[field]) for row in rows)
 
+    def mean(field: str) -> float:
+        # The judge reports a metric with no denominator as n/a; such a PR is left out rather than counted as zero.
+        defined = [row[field] for row in rows if row[field] is not None]
+        return _ratio(sum(defined), len(defined))
+
     gp = _ratio(total("matched_tp_count"), total("matched_count"))
     gr = _ratio(total("golden_covered_count"), total("golden_tp_count"))
     ap = _ratio(total("matched_tp_count") + total("unmatched_tp_count"), total("candidate_count"))
     ar = _ratio(
         total("golden_covered_count") + total("novel_tp_count"), total("golden_tp_count") + total("novel_tp_count")
     )
-    macro = {
-        metric: _ratio(sum(row[metric] for row in rows if row[metric] is not None), len(rows))
-        for metric in ("grounded_precision", "grounded_recall")
-    }
+    macro_gf1 = _f1(mean("grounded_precision"), mean("grounded_recall"))
     severity = []
     for level in _SEVERITIES:
         found = [per_pr[key]["by_severity"][level] for key in keys if level in per_pr[key]["by_severity"]]
@@ -53,7 +55,7 @@ def _line(name: str, per_pr: dict[str, Any], keys: Sequence[str]) -> str:
         severity.append(f"{level} {covered}/{sum(int(row['golden_tp_count']) for row in found)}")
     return (
         f"{name:20} {len(rows):3} PRs  GF1 {100 * _f1(gp, gr):5.1f} (GP {100 * gp:5.1f} GR {100 * gr:5.1f})  "
-        f"macro GF1 {100 * _f1(macro['grounded_precision'], macro['grounded_recall']):5.1f}  "
+        f"macro GF1 {100 * macro_gf1:5.1f}  "
         f"AP {100 * ap:5.1f} AR {100 * ar:5.1f}  {_ratio(total('candidate_count'), len(rows)):4.1f} findings/PR  "
         f"golden {total('golden_covered_count')}/{total('golden_tp_count')}  {', '.join(severity)}"
     )

@@ -97,6 +97,9 @@ class _DeliberationRecorder(Recorder):
             unrecorded.append(f"Record an assessment with `{_ASSESS_TOOL}` for each of these prior findings: {ids}.")
         return f"{' '.join(unrecorded)} Record a few per turn." if unrecorded else None
 
+    def has_records(self) -> bool:
+        return bool(self._decisions.records or self._assessments.records)
+
     def candidate(self) -> DeliberationCandidate:
         """Return what was recorded, in input order; the graph closes both sets over the supplied IDs."""
         return DeliberationCandidate(

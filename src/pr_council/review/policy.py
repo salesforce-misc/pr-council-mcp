@@ -173,6 +173,10 @@ def render_review_summary(
         if unverified:
             clauses.append(f"{unverified} could not be verified")
         prior = "; ".join(clauses) + "."
+        # An unresolved issue below min_severity has no finding here; its earlier review's comment still stands.
+        if suppressed := follow_up.get("unresolved_suppressed", 0):
+            verb = "is" if suppressed == 1 else "are"
+            prior += f" {suppressed} of them {verb} below this review's severity threshold and not repeated."
     new = _count(
         follow_up.get("new", 0),
         "new issue was found.",

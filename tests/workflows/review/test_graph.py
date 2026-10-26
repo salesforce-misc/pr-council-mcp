@@ -1134,6 +1134,11 @@ async def test_an_incomplete_deliberation_keeps_its_undecided_findings(monkeypat
         for decision in result["finding_decisions"]
     ] == [("keep", "The deliberator did not decide this finding, so it is kept as written.")] * 2
     assert store.preview["metrics"]["reviewers"]["deliberatorToolCalls"] == 4
+    # The human approving the preview sees that these findings were never deliberated, not only the log.
+    assert [result["undecided_findings"] for result in paused["deliberation_results"]] == [1, 1]
+    assert store.preview["summary"].endswith(
+        "> ⚠️ **Deliberation incomplete:** 2 findings were not deliberated and kept as the reviewers wrote them."
+    )
     events = [(level, event, values.get("disposition")) for level, event, values in recorded_log.events]
     for disposition in ("quality", "security"):
         assert ("warning", "review.deliberation_incomplete", disposition) in events
@@ -1181,7 +1186,7 @@ async def test_findings_below_min_severity_are_previewed_but_never_published(
     assert store.result["summary"] == preview["summary"]
 
 
-async def test_incomplete_aggregation_is_logged_and_still_previews(monkeypatch, tmp_path):
+async def test_incomplete_aggregation_is_logged_and_shown_in_the_preview(monkeypatch, tmp_path):
     _patch_graph_fakes(monkeypatch)
     warnings: list[tuple[str, dict[str, object]]] = []
 
@@ -1215,44 +1220,50 @@ async def test_incomplete_aggregation_is_logged_and_still_previews(monkeypatch, 
         },
     ) in warnings
     assert len(store.preview["comments"]) == 1
+    assert "**Aggregation incomplete:**" in store.preview["summary"]
+    assert "Deliberation incomplete" not in store.preview["summary"]
 
 
-async def test_follow_up_summary_counts_only_findings_not_carried_from_the_baseline(monkeypatch, tmp_path):
-    _patch_graph_fakes(monkeypatch)
+async def aggregate_separately(model, **values):
+    candidate = AggregationCandidate(
+        findings=[
+            AggregatedFinding(
+                id="replaced",
+                title=finding["title"],
+                body=finding["body"],
+                severity=finding["severity"],
+                path=finding["path"],
+                line=finding["line"],
+                source_finding_ids=[finding["id"]],
+            )
+            for finding in values["findings"]
+        ]
+    )
+    return candidate, Usage(total_tokens=5)
 
-    async def aggregate_separately(model, **values):
-        candidate = AggregationCandidate(
-            findings=[
-                AggregatedFinding(
-                    id="replaced",
-                    title=finding["title"],
-                    body=finding["body"],
-                    severity=finding["severity"],
-                    path=finding["path"],
-                    line=finding["line"],
-                    source_finding_ids=[finding["id"]],
-                )
-                for finding in values["findings"]
-            ]
-        )
-        return candidate, Usage(total_tokens=5)
 
-    monkeypatch.setattr(graph_module, "aggregate", aggregate_separately)
+def _baseline_operation(severity=Severity.HIGH):
     baseline_finding = AggregatedFinding(
         id="baseline-id",
         title="Existing defect",
         body="The original defect.",
-        severity=Severity.HIGH,
+        severity=severity,
         path="app.py",
         line=1,
         dispositions=["quality"],
         reviewer_models=["model-a"],
         source_finding_ids=["original-reviewer-id"],
     )
-    baseline = SimpleNamespace(
+    return SimpleNamespace(
         id="baseline-operation",
         result={"context": [], "findings": [baseline_finding.model_dump(mode="json")]},
     )
+
+
+async def test_follow_up_summary_counts_only_findings_not_carried_from_the_baseline(monkeypatch, tmp_path):
+    _patch_graph_fakes(monkeypatch)
+    monkeypatch.setattr(graph_module, "aggregate", aggregate_separately)
+    baseline = _baseline_operation()
     store = FakeStore(baseline)
     state = _initial_state("follow-up-operation", {"quality": ["model-a"], "security": ["model-b"]})
     state["request"] |= {"mode": "follow_up", "baseline_operation_id": baseline.id}
@@ -1269,3 +1280,45 @@ async def test_follow_up_summary_counts_only_findings_not_carried_from_the_basel
     assert store.preview["summary"] == (
         "No previously reported issues were resolved; 1 remains unresolved. 2 new issues were found."
     )
+
+
+async def test_a_suppressed_unresolved_prior_finding_is_disclosed_and_stays_tracked(monkeypatch, tmp_path):
+    _patch_graph_fakes(monkeypatch)
+    monkeypatch.setattr(graph_module, "aggregate", aggregate_separately)
+    baseline = _baseline_operation(Severity.LOW)
+    store = FakeStore(baseline)
+    git = FakeGit()
+    state = _initial_state("follow-up-operation", {"quality": ["model-a"], "security": ["model-b"]})
+    state["request"] |= {
+        "mode": "follow_up",
+        "baseline_operation_id": baseline.id,
+        "min_severity": "medium",
+        "min_severity_source": "override",
+    }
+    graph_config = {"configurable": {"thread_id": "follow-up-operation"}, "recursion_limit": 100}
+    async with AsyncSqliteSaver.from_conn_string(os.fspath(tmp_path / "follow-up.sqlite3")) as checkpointer:
+        await checkpointer.setup()
+        graph = build_review_graph(_make_deps(tmp_path, store, git), checkpointer)
+        await graph.ainvoke(state, config=graph_config)
+        preview = store.preview
+        await graph.ainvoke(
+            Command(
+                resume={"action": "commit", "revision": preview["revision"], "payload_hash": preview["payload_hash"]}
+            ),
+            config=graph_config,
+        )
+
+    # The low-severity prior finding is still present but below the threshold, so it has no comment of its own.
+    assert [finding["title"] for finding in preview["suppressed_findings"]] == ["Existing defect"]
+    assert len(git.posted[0]["comments"]) == 2
+    assert preview["metrics"]["follow_up"]["unresolved_suppressed"] == 1
+    assert preview["summary"] == (
+        "No previously reported issues were resolved; 1 remains unresolved. 1 of them is below this review's "
+        "severity threshold and not repeated. 2 new issues were found."
+    )
+    # An earlier review published it, so the next follow-up still assesses it.
+    assert [finding["title"] for finding in store.result["findings"]] == [
+        "Incorrect value",
+        "Incorrect value",
+        "Existing defect",
+    ]
