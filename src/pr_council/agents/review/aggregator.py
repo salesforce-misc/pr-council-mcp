@@ -1,151 +1,155 @@
-"""Holistic LangChain aggregation and summary agent."""
+"""Holistic LangChain aggregation agent."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from typing import Any
 
-from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AnyMessage, HumanMessage
-from langchain_core.runnables import RunnableConfig
-from localmcp.retry import is_retryable_error
-from localmcp.structured_output import SubmitResultError, SubmitResultMiddleware
+from langchain_core.tools import ToolException
+from pydantic import BaseModel, Field
 
-from pr_council.agents.review.common import (
-    BASE_SAFETY,
-    ResponseUsageCallback,
-    Usage,
-    extract_callback_usage,
-)
-from pr_council.review.models import AggregationCandidate, ReviewError
+from pr_council.agents.review.common import BASE_SAFETY, Usage
+from pr_council.agents.review.recording import ClosedSet, Recorder, recording_tool, run_recording_agent
+from pr_council.review.models import AggregatedFinding, AggregationCandidate
 
-_AGGREGATION_PROMPT = """Aggregate overlapping retained findings and write a minimal top-level PR review summary.
-The only valid source_finding_ids are the IDs listed in requiredSourceFindingIds. Every aggregate must cite one or
-more of those IDs, and every required ID must occur exactly once across the aggregates. IDs appearing only in
-baselineFindings or priorFindingAssessments are context identifiers, not source finding IDs. Do not create a new
-issue. Preserve concrete locations. Keep each finding body concise but actionable and able to stand alone if the
-finding cannot be posted inline. Never list or restate finding titles, locations, severity, evidence, explanations, or
-remediation in the summary; those belong with the findings. The reviewKind input explicitly identifies an initial or
-follow-up review. For an initial review, write exactly one short sentence stating only how many critical or
-high-severity items need to be addressed before merge. For a follow-up review, write at most two short sentences
-containing only status counts. Example: "2 previously reported issues were resolved; none remain unresolved. 1 new
-issue was found." Never describe a new or prior issue, give its severity, make a merge recommendation, or use a colon
-to introduce issue details in a follow-up summary. Do not include any other narrative."""
+_MERGE_TOOL = "merge_findings"
+
+_AGGREGATION_PROMPT = f"""Merge retained findings that describe the same defect. For each such group, call
+`{_MERGE_TOOL}` with two or more IDs from retainedFindings, a merged title and body, and the path and line of one of
+the merged findings. You may record several merges in one turn. Each ID can be merged only once, and a rejected call
+records nothing. Findings you do not merge are published exactly as written, so never merge a finding only to rephrase
+it. Merge findings only when they describe the same defect, which one change at one location fixes. Distinct defects at
+the same location stay separate, and so do findings in different places that each need their own change, even when
+they share a cause. IDs
+appearing only in baselineFindings or priorFindingAssessments are context identifiers, not retained finding IDs. Do
+not create a new issue. Keep each merged body concise but actionable and able to stand alone if the finding cannot be
+posted inline. When every merge is recorded, or if no findings overlap, reply with a short confirmation and no tool
+calls."""
+
+
+class FindingMerge(BaseModel):
+    source_finding_ids: list[str] = Field(min_length=2)
+    title: str = Field(min_length=1, max_length=240)
+    body: str = Field(min_length=1, max_length=8_000)
+    path: str
+    line: int = Field(gt=0)
+
+
+class _MergeRecorder(Recorder):
+    """Record each merge through its own call, so no single response has to carry the whole result.
+
+    Unmerged findings never pass through the model at all.
+    """
+
+    def __init__(self, findings: list[dict[str, Any]]):
+        self._findings = {str(finding["id"]): finding for finding in findings}
+        self._merged = ClosedSet[int](self._findings, source="retainedFindings", recorded="merged")
+        self.merges: list[FindingMerge] = []
+        self.items = len(findings)
+        self.tools = [
+            recording_tool(
+                self.merge,
+                name=_MERGE_TOOL,
+                description="Merge two or more retained findings that describe the same defect into one finding.",
+                schema=FindingMerge,
+            )
+        ]
+
+    async def merge(self, **values: Any) -> str:
+        merge = FindingMerge.model_validate(values)
+        ids = merge.source_finding_ids
+        self._merged.check(ids)
+        if (merge.path, merge.line) not in {(self._findings[i]["path"], self._findings[i]["line"]) for i in ids}:
+            raise ToolException("Not recorded: use the path and line of one of the merged findings.")
+        self._merged.record(ids, len(self.merges))
+        self.merges.append(merge)
+        return f"Merged {len(ids)} findings. {len(self._merged.open())} unmerged findings will be published as written."
+
+    def remaining(self) -> str | None:
+        if len(self._merged.open()) < 2:
+            return None
+        return f"Record any remaining merges with `{_MERGE_TOOL}`, a few per turn, or reply briefly if none remain."
+
+    def has_records(self) -> bool:
+        return bool(self.merges)
+
+    def candidate(self) -> AggregationCandidate:
+        """Return every finding once, in input order, with each merge at the position of its first member.
+
+        A merge carries its first member's severity as a placeholder: IDs, severity, and attribution are derived from
+        the source findings during graph validation.
+        """
+        findings: list[AggregatedFinding] = []
+        emitted: set[int] = set()
+        for source_id, source in self._findings.items():
+            index = self._merged.records.get(source_id)
+            if index is None:
+                findings.append(
+                    AggregatedFinding(
+                        id=source_id,
+                        title=source["title"],
+                        body=source["body"],
+                        severity=source["severity"],
+                        path=source["path"],
+                        line=source["line"],
+                        source_finding_ids=[source_id],
+                    )
+                )
+            elif index not in emitted:
+                emitted.add(index)
+                merge = self.merges[index]
+                findings.append(
+                    AggregatedFinding(
+                        id=source_id,
+                        title=merge.title,
+                        body=merge.body,
+                        severity=source["severity"],
+                        path=merge.path,
+                        line=merge.line,
+                        source_finding_ids=merge.source_finding_ids,
+                    )
+                )
+        return AggregationCandidate(findings=findings)
 
 
 async def aggregate(
     model: BaseChatModel,
     *,
-    findings: list[dict[str, object]],
+    findings: list[dict[str, Any]],
     prior_assessments: list[dict[str, object]],
     baseline_findings: list[dict[str, object]],
     context_changes: list[dict[str, object]],
     context: list[dict[str, object]],
-    validate_candidate: Callable[[AggregationCandidate], AggregationCandidate] | None = None,
     usage: Usage | None = None,
     langfuse_callback: Any | None = None,
+    on_incomplete: Callable[[Exception], None] | None = None,
 ) -> tuple[AggregationCandidate, Usage]:
-    # The same unforced submission tool as the reviewers. This is a cross-model requirement: forced tool_choice
-    # and provider-native schemas are not supported by every model and gateway, so the unforced tool and its
-    # correction rounds are the lowest common denominator.
-    agent = create_agent(
-        model,
-        [],
-        system_prompt=f"{BASE_SAFETY}\n\n{_AGGREGATION_PROMPT}",
-        middleware=[SubmitResultMiddleware(AggregationCandidate, max_attempts=3)],
-        name="pr-review-aggregator",
-    )
-    required_source_ids = [str(finding["id"]) for finding in findings]
-    messages: list[AnyMessage | dict[str, Any]] = [
-        HumanMessage(
-            content=json.dumps(
-                {
-                    "reviewKind": "follow_up" if baseline_findings else "initial",
-                    "retainedFindings": findings,
-                    "requiredSourceFindingIds": required_source_ids,
-                    "priorFindingAssessments": prior_assessments,
-                    "baselineFindings": baseline_findings,
-                    "reviewContextChangesSinceBaseline": context_changes,
-                    "reviewContext": context,
-                }
-            )
-        ),
-    ]
     # Accumulate into a caller-supplied Usage when given so token spend from an
     # invocation that later re-raises a transient error (retried by the caller's
     # call_with_rate_limit_retry) is preserved across outer attempts rather than
     # discarded with the raised exception.
     usage = usage if usage is not None else Usage()
-    last_error: object = "structured output was missing"
-    # Outer correction rounds re-prompt with the error when the submission tool's own rounds are exhausted or a
-    # well-formed result fails application validation. Transport faults go to the caller's backoff instead.
-    for _attempt in range(3):
-        usage_callback = ResponseUsageCallback()
-        callbacks: list[Any] = [usage_callback]
-        if langfuse_callback is not None:
-            callbacks.append(langfuse_callback)
-        config: RunnableConfig = {"run_name": "pr-review-aggregator", "callbacks": callbacks}
-        candidate: AggregationCandidate | None = None
-        try:
-            result = await agent.ainvoke({"messages": messages}, config=config)
-        except SubmitResultError as exc:
-            last_error = exc
-        except Exception as exc:
-            # Transient transport/API faults (429, 5xx, connection, timeout) are not
-            # fixable by the correction retries below: re-raise them so the caller's
-            # call_with_rate_limit_retry applies its reset-aware backoff instead of
-            # burning all three local attempts with no delay.
-            if is_retryable_error(exc):
-                raise
-            last_error = exc
-        else:
-            candidate = result["structured_response"]
-            # Continue from the submitted result so a validation correction has the prior answer in context.
-            messages = list(result["messages"])
-        finally:
-            _add_usage(usage, extract_callback_usage(usage_callback))
-        if candidate is None:
-            # Feed the failure back: aggregation runs at temperature 0, so without a
-            # corrective message every retry replays the same malformed output
-            # against identical input and wastes the attempt.
-            messages.append(
-                HumanMessage(
-                    content=json.dumps(
-                        {
-                            "correction": "The previous attempt did not submit a valid result. "
-                            "Submit a corrected AggregationCandidate.",
-                            "schemaError": str(last_error),
-                            "requiredSourceFindingIds": required_source_ids,
-                        }
-                    )
-                )
-            )
-            continue
-        if validate_candidate is None:
-            return candidate, usage
-        try:
-            return validate_candidate(candidate), usage
-        except (ReviewError, ValueError) as exc:
-            last_error = exc
-            messages.append(
-                HumanMessage(
-                    content=json.dumps(
-                        {
-                            "correction": "The previous aggregation failed validation. Submit a corrected result.",
-                            "validationError": str(exc),
-                            "requiredSourceFindingIds": required_source_ids,
-                        }
-                    )
-                )
-            )
-    raise ReviewError(f"aggregation did not return a valid result after 3 attempts: {last_error}")
-
-
-def _add_usage(total: Usage, current: Usage) -> None:
-    total.input_tokens += current.input_tokens
-    total.output_tokens += current.output_tokens
-    total.total_tokens += current.total_tokens
-    total.tool_calls += current.tool_calls
-    total.complete = total.complete and current.complete
+    recorder = _MergeRecorder(findings)
+    if len(findings) < 2:
+        return recorder.candidate(), usage
+    await run_recording_agent(
+        model,
+        recorder,
+        name="pr-review-aggregator",
+        run_name="pr-review-aggregator",
+        system_prompt=f"{BASE_SAFETY}\n\n{_AGGREGATION_PROMPT}",
+        payload={
+            "retainedFindings": findings,
+            "priorFindingAssessments": prior_assessments,
+            "baselineFindings": baseline_findings,
+            "reviewContextChangesSinceBaseline": context_changes,
+            "reviewContext": context,
+        },
+        usage=usage,
+        langfuse_callback=langfuse_callback,
+        # Every finding is publishable without merging, so a deterministic failure keeps the merges already
+        # recorded instead of failing the review.
+        on_incomplete=on_incomplete,
+    )
+    return recorder.candidate(), usage

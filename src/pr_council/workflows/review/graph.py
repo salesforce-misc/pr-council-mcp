@@ -55,9 +55,11 @@ from pr_council.review.policy import (
     normalize_prior_assessments,
     payload_hash,
     reconcile_assessment_decisions,
+    reconcile_finding_decisions,
     render_additional_findings,
     render_comment_footer,
     render_comment_metadata,
+    render_review_summary,
     render_stats_comment,
     render_summary_footer,
     unique,
@@ -67,6 +69,7 @@ from pr_council.review.store import OperationStore
 log = get_logger(__name__)
 
 _SEVERITY_RANK = {severity: rank for rank, severity in enumerate(Severity)}
+_UNRESOLVED_STATUSES = frozenset({"still_present", "partially_resolved"})
 
 
 class GraphState(TypedDict, total=False):
@@ -97,6 +100,7 @@ class GraphState(TypedDict, total=False):
     prior_assessments: list[dict[str, Any]]
     aggregation: dict[str, Any]
     aggregation_usage: dict[str, Any]
+    aggregation_incomplete: bool
     preview: dict[str, Any]
     decision: dict[str, Any]
     final_status: str
@@ -636,9 +640,10 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             if assessment.get("finding_id") in prior_ids
         ]
         model_id = state["request"]["deliberation_model"]
-        usage_callback = ResponseUsageCallback()
         limits = deps.config.pr_review.limits
-        failed_tool_calls = 0
+        # Shared across outer retries so token spend and source-tool calls from an attempt that re-raises a
+        # transient error are still reported; the durable operation budget has already charged those calls.
+        deliberation_usage = Usage()
 
         async def run_deliberation() -> Any:
             # Allocate a fresh local budget per attempt: ToolBudget.claim() only ever
@@ -646,46 +651,45 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             # attempts would leave a retry pre-charged and prematurely exhausted. The
             # operation-wide claim is durable (store-backed by operation_id), so the
             # cross-attempt operation limit is still enforced.
-            nonlocal failed_tool_calls
             tool_budget = deps.tool_budget(
                 state["operation_id"],
                 deps.config.pr_review.limits.deliberator_tool_calls_per_disposition,
                 state["request"]["operation_tool_limit"],
             )
-            try:
-                model_owner = deps.model_factory.create(
-                    model_id=model_id,
-                    max_output_tokens=state["request"]["model_output_tokens_per_call"],
-                )
-                async with model_owner as model:
-                    return await deliberate(
-                        model,
-                        _review_sandbox_profile(
-                            state["worktree_path"],
-                            state["git_metadata_root"],
-                            state.get("source_excluded_paths"),
-                        ),
-                        state["base_sha"],
-                        state["head_sha"],
+            model_owner = deps.model_factory.create(
+                model_id=model_id,
+                max_output_tokens=state["request"]["model_output_tokens_per_call"],
+            )
+            async with model_owner as model:
+                return await deliberate(
+                    model,
+                    _review_sandbox_profile(
+                        state["worktree_path"],
+                        state["git_metadata_root"],
+                        state.get("source_excluded_paths"),
+                    ),
+                    state["base_sha"],
+                    state["head_sha"],
+                    disposition=disposition,
+                    findings=findings,
+                    assessments=assessments,
+                    prior_findings=prior_findings,
+                    context=state["context"],
+                    tool_budget=tool_budget,
+                    source_tool_timeout_seconds=state["request"].get(
+                        "source_tool_timeout_seconds",
+                        deps.config.pr_review.limits.source_tool_timeout_seconds,
+                    ),
+                    usage=deliberation_usage,
+                    langfuse_callback=deps.telemetry.langchain_callback(),
+                    on_incomplete=lambda exc: log.warning(
+                        "review.deliberation_incomplete",
+                        operation_id=state["operation_id"],
                         disposition=disposition,
-                        findings=findings,
-                        assessments=assessments,
-                        prior_findings=prior_findings,
-                        context=state["context"],
-                        tool_budget=tool_budget,
-                        source_tool_timeout_seconds=state["request"].get(
-                            "source_tool_timeout_seconds",
-                            deps.config.pr_review.limits.source_tool_timeout_seconds,
-                        ),
-                        usage_callback=usage_callback,
-                        langfuse_callback=deps.telemetry.langchain_callback(),
-                    )
-            except Exception:
-                # A retried attempt's tool calls are still charged against the durable
-                # operation budget, so fold them into the successful attempt's usage
-                # rather than under-reporting the deliberator's true tool spend.
-                failed_tool_calls += tool_budget.used
-                raise
+                        model=model_id,
+                        error_type=type(exc).__name__,
+                    ),
+                )
 
         with deps.telemetry.span(
             "pr_review.deliberator",
@@ -709,9 +713,6 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                     status_code=getattr(exc, "status_code", None),
                 ),
             )
-            # Fold in tool calls charged by earlier transiently-failed attempts so the
-            # deliberator's reported spend matches what the durable budget was billed.
-            total_tool_calls = usage.tool_calls + failed_tool_calls
             observation.update(
                 usage_details={
                     "input": usage.input_tokens,
@@ -719,21 +720,32 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                     "total": usage.total_tokens,
                 },
                 metadata={
-                    "tool_calls": total_tool_calls,
+                    "tool_calls": usage.tool_calls,
                     "token_accounting_complete": usage.complete,
                     "decision_count": len(candidate.finding_decisions),
                 },
             )
-        finding_ids = {finding["id"] for finding in findings}
-        decision_ids = [decision.finding_id for decision in candidate.finding_decisions]
-        if set(decision_ids) != finding_ids or len(decision_ids) != len(set(decision_ids)):
-            raise ReviewError(f"{disposition} deliberation did not decide the exact finding set")
+        finding_ids = {str(finding["id"]) for finding in findings}
+        supplied_finding_decisions = candidate.finding_decisions
         supplied_assessment_decisions = candidate.assessment_decisions
+        undecided = finding_ids - {decision.finding_id for decision in supplied_finding_decisions}
         candidate = candidate.model_copy(
             update={
-                "assessment_decisions": reconcile_assessment_decisions(supplied_assessment_decisions, prior_findings)
+                "finding_decisions": reconcile_finding_decisions(supplied_finding_decisions, findings),
+                "assessment_decisions": reconcile_assessment_decisions(supplied_assessment_decisions, prior_findings),
             }
         )
+        if (
+            len(candidate.finding_decisions) != len(supplied_finding_decisions)
+            or {decision.finding_id for decision in supplied_finding_decisions} != finding_ids
+        ):
+            log.warning(
+                "review.finding_decisions_defaulted",
+                operation_id=state["operation_id"],
+                disposition=disposition,
+                supplied=len(supplied_finding_decisions),
+                required=len(finding_ids),
+            )
         if (
             len(candidate.assessment_decisions) != len(supplied_assessment_decisions)
             or {decision.finding_id for decision in supplied_assessment_decisions} != prior_ids
@@ -753,12 +765,14 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             model=model_id,
             finding_decisions=candidate.finding_decisions,
             assessment_decisions=candidate.assessment_decisions,
+            undecided_findings=len(undecided),
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             total_tokens=usage.total_tokens,
             token_accounting_complete=usage.complete,
-            tool_calls=total_tool_calls,
+            tool_calls=usage.tool_calls,
         )
+        severities = {finding["id"]: finding["severity"] for finding in findings}
         for decision in result.finding_decisions:
             if decision.decision == "remove_as_false_positive":
                 log.info(
@@ -766,6 +780,15 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                     operation_id=state["operation_id"],
                     finding_id=decision.finding_id,
                     disposition=disposition,
+                )
+            elif decision.revision is not None:
+                log.info(
+                    "review.finding_revised",
+                    operation_id=state["operation_id"],
+                    finding_id=decision.finding_id,
+                    disposition=disposition,
+                    severity_from=severities[decision.finding_id],
+                    severity_to=decision.revision.severity.value,
                 )
         return {"deliberation_results": [result.model_dump(mode="json")]}
 
@@ -779,13 +802,25 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             if not result.get("failed")
             for finding in result["findings"]
         }
-        retained_ids = {
-            decision["finding_id"]
-            for result in state["deliberation_results"]
-            for decision in result["finding_decisions"]
-            if decision["decision"] == "keep"
-        }
-        retained = [all_findings[finding_id] for finding_id in retained_ids]
+        # Deliberation order keeps the aggregator input deterministic. A revision corrects the claim but never the
+        # finding's identity or location; the reviewer's original stays in reviewer_results.
+        retained_by_id: dict[str, dict[str, Any]] = {}
+        for result in state["deliberation_results"]:
+            for decision in result["finding_decisions"]:
+                if decision["decision"] == "remove_as_false_positive":
+                    continue
+                finding = all_findings[decision["finding_id"]]
+                revision = decision.get("revision") if decision["decision"] == "revise" else None
+                if revision is not None:
+                    finding = {
+                        **finding,
+                        "title": revision["title"],
+                        "body": revision["body"],
+                        "severity": revision["severity"],
+                        "evidence": finding["evidence"] if revision.get("evidence") is None else revision["evidence"],
+                    }
+                retained_by_id[decision["finding_id"]] = finding
+        retained = list(retained_by_id.values())
         raw_assessments = [
             decision for result in state["deliberation_results"] for decision in result["assessment_decisions"]
         ]
@@ -793,7 +828,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         baseline = {finding["id"]: finding for finding in state.get("baseline_findings", [])}
         remaining_prior: list[dict[str, Any]] = []
         for assessment in assessments:
-            if assessment["status"] not in {"still_present", "partially_resolved"}:
+            if assessment["status"] not in _UNRESOLVED_STATUSES:
                 continue
             old = baseline.get(assessment["finding_id"])
             if old is None:
@@ -803,10 +838,9 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                     finding_id=assessment["finding_id"],
                 )
                 continue
-            material = f"follow-up\0{assessment['finding_id']}\0{assessment['status']}"
             remaining_prior.append(
                 Finding(
-                    id=hashlib.sha256(material.encode()).hexdigest()[:20],
+                    id=_carried_finding_id(assessment),
                     title=old["title"],
                     body=assessment["rationale"],
                     severity=old["severity"],
@@ -826,6 +860,18 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         # Shared across outer retries so token spend from an attempt that re-raises
         # a transient error is preserved rather than discarded with the exception.
         aggregation_usage = Usage()
+        incomplete = False
+
+        def on_incomplete(exc: Exception) -> None:
+            # A failure after some merges keeps them; the preview then says that merging may be incomplete.
+            nonlocal incomplete
+            incomplete = True
+            log.warning(
+                "review.aggregation_incomplete",
+                operation_id=state["operation_id"],
+                model=model_id,
+                error_type=type(exc).__name__,
+            )
 
         async def run_aggregation() -> Any:
             model_owner = deps.model_factory.create(
@@ -840,9 +886,9 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                     baseline_findings=state.get("baseline_findings", []),
                     context_changes=state.get("context_changes", []),
                     context=state["context"],
-                    validate_candidate=lambda value: _validate_aggregation(value, retained),
                     usage=aggregation_usage,
                     langfuse_callback=deps.telemetry.langchain_callback(),
+                    on_incomplete=on_incomplete,
                 )
 
         with deps.telemetry.span(
@@ -885,6 +931,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             "prior_assessments": assessments,
             "aggregation": normalized.model_dump(mode="json"),
             "aggregation_usage": usage.model_dump(),
+            "aggregation_incomplete": incomplete,
             "timing": timing,
         }
 
@@ -993,6 +1040,12 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                 summary_body=preview.summary_body,
                 comments=preview.comments,
             )
+        # A follow-up tracks only what was published, so suppressed findings never become baseline findings. An
+        # unresolved prior finding was published by an earlier review, so it stays tracked even when suppressed here.
+        carried = _carried_finding_ids(state.get("prior_assessments", []))
+        untracked_ids = {
+            finding.id for finding in preview.suppressed_findings if carried.isdisjoint(finding.source_finding_ids)
+        }
         result = {
             "operation_id": state["operation_id"],
             "status": OperationStatus.COMPLETED.value,
@@ -1003,9 +1056,9 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             "mode": state["mode"],
             "baseline_operation_id": state.get("baseline_operation_id"),
             "context": state["context"],
-            "findings": state["aggregation"]["findings"],
+            "findings": [finding for finding in state["aggregation"]["findings"] if finding["id"] not in untracked_ids],
             "prior_assessments": state.get("prior_assessments", []),
-            "summary": state["aggregation"]["summary"],
+            "summary": preview.summary,
             "metrics": preview.metrics.model_dump(mode="json"),
         }
         await deps.store.update(state["operation_id"], status=OperationStatus.COMPLETED, result=result)
@@ -1084,7 +1137,17 @@ def _validate_aggregation(candidate: AggregationCandidate, retained: list[dict[s
         )
         finding.context_refs = unique(ref for member in members for ref in member.context_refs)
         normalized.append(finding)
-    return AggregationCandidate(summary=candidate.summary, findings=normalized)
+    return AggregationCandidate(findings=normalized)
+
+
+def _carried_finding_id(assessment: dict[str, Any]) -> str:
+    """Return the stable ID of the finding that carries an unresolved prior finding into a follow-up."""
+    material = f"follow-up\0{assessment['finding_id']}\0{assessment['status']}"
+    return hashlib.sha256(material.encode()).hexdigest()[:20]
+
+
+def _carried_finding_ids(assessments: list[dict[str, Any]]) -> set[str]:
+    return {_carried_finding_id(item) for item in assessments if item["status"] in _UNRESOLVED_STATUSES}
 
 
 def _merge_assessments(assessments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1152,21 +1215,30 @@ def _build_preview(state: GraphState) -> ReviewPreview:
         by_model[deliberation.model] = by_model.get(deliberation.model, 0) + deliberation.total_tokens
     aggregation_model = request["aggregation_model"]
     by_model[aggregation_model] = by_model.get(aggregation_model, 0) + aggregation_usage["total_tokens"]
-    removed = sum(
-        decision["decision"] == "remove_as_false_positive"
-        for result in state["deliberation_results"]
-        for decision in result["finding_decisions"]
-    )
+    decisions = [
+        decision["decision"] for result in state["deliberation_results"] for decision in result["finding_decisions"]
+    ]
+    # Requests persisted before min_severity existed published everything.
+    min_severity = Severity(request.get("min_severity", Severity.INFO.value))
+    published = [
+        finding for finding in aggregation.findings if _SEVERITY_RANK[finding.severity] >= _SEVERITY_RANK[min_severity]
+    ]
+    suppressed = [finding for finding in aggregation.findings if finding not in published]
     commentable = commentable_lines(state["diff"])
-    inline = [finding for finding in aggregation.findings if finding.line in commentable.get(finding.path, set())]
-    summary_only = [finding for finding in aggregation.findings if finding not in inline]
+    inline = [finding for finding in published if finding.line in commentable.get(finding.path, set())]
+    summary_only = [finding for finding in published if finding not in inline]
     follow_counts = None
     if state["mode"] == ReviewMode.FOLLOW_UP.value:
+        prior_assessments = state.get("prior_assessments", [])
         follow_counts = {
-            status: sum(item["status"] == status for item in state.get("prior_assessments", []))
+            status: sum(item["status"] == status for item in prior_assessments)
             for status in ("resolved", "still_present", "partially_resolved", "cannot_verify")
         }
-        follow_counts["new"] = len(aggregation.findings)
+        carried = _carried_finding_ids(prior_assessments)
+        follow_counts["new"] = sum(carried.isdisjoint(finding.source_finding_ids) for finding in published)
+        follow_counts["unresolved_suppressed"] = sum(
+            not carried.isdisjoint(finding.source_finding_ids) for finding in suppressed
+        )
     metrics = ReviewMetrics(
         models=request["models"],
         findings=findings_by_model,
@@ -1202,11 +1274,13 @@ def _build_preview(state: GraphState) -> ReviewPreview:
         },
         results={
             "rawFindings": sum(len(result.findings) for result in reviewers),
-            "falsePositivesRemoved": removed,
+            "falsePositivesRemoved": decisions.count("remove_as_false_positive"),
+            "revisedFindings": decisions.count("revise"),
             "retainedFindings": len(state["retained_findings"]),
             "aggregatedFindings": len(aggregation.findings),
             "inlineComments": len(inline),
             "summaryOnlyFindings": len(summary_only),
+            "suppressedFindings": len(suppressed),
         },
         follow_up=follow_counts,
         context={"items": len(state["context"]), "characters": sum(len(item["content"]) for item in state["context"])},
@@ -1262,7 +1336,33 @@ def _build_preview(state: GraphState) -> ReviewPreview:
             "\n\n> ⚠️ **Review coverage degraded:** the following reviewer jobs failed after retries: "
             f"{failed_jobs}. Findings do not include their independent analysis."
         )
-    summary = neutralize_github_markup(aggregation.summary + extra + coverage_warning)
+    if undecided := sum(result.undecided_findings for result in deliberations):
+        noun = "finding was" if undecided == 1 else "findings were"
+        coverage_warning += (
+            f"\n\n> ⚠️ **Deliberation incomplete:** {undecided} {noun} not deliberated and "
+            "kept as the reviewers wrote them."
+        )
+    if state.get("aggregation_incomplete"):
+        coverage_warning += (
+            "\n\n> ⚠️ **Aggregation incomplete:** aggregation ended early, so findings that describe the same "
+            "defect may not all be merged."
+        )
+    summary = neutralize_github_markup(
+        render_review_summary(published, follow_up=follow_counts) + extra + coverage_warning
+    )
+    suppression_note = None
+    if suppressed:
+        count = len(suppressed)
+        noun = "finding below" if count == 1 else "findings below"
+        verb = "was" if count == 1 else "were"
+        source = (
+            "this review's `min_severity` override"
+            if request.get("min_severity_source") == "override"
+            else "the configured `min_severity`"
+        )
+        suppression_note = (
+            f"{count} {noun} {min_severity.value} severity {verb} suppressed by {source} and will not be published."
+        )
     summary_body = summary + render_stats_comment(metrics)
     summary_body += (
         f'\n\n<!-- pr-council-mcp-operation\n{{"operationId": "{state["operation_id"]}", "revision": {revision}}}\n-->'
@@ -1301,4 +1401,7 @@ def _build_preview(state: GraphState) -> ReviewPreview:
         reviewer_failures=reviewer_failures,
         mode=ReviewMode(state["mode"]),
         baseline_operation_id=state.get("baseline_operation_id"),
+        min_severity=min_severity,
+        suppressed_findings=suppressed,
+        suppression_note=suppression_note,
     )

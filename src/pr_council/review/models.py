@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from pr_council.errors import PrCouncilError
 
@@ -139,10 +139,30 @@ class ReviewerResult(BaseModel):
     error: str | None = None
 
 
+class FindingRevision(BaseModel):
+    """A deliberator's correction of a finding's claim. Its identity and location never change."""
+
+    title: str = Field(min_length=1, max_length=240)
+    body: str = Field(min_length=1, max_length=8_000)
+    severity: Severity
+    evidence: str | None = Field(default=None, max_length=4_000)
+
+
 class FindingDecision(BaseModel):
     finding_id: str
-    decision: Literal["keep", "remove_as_false_positive"]
+    decision: Literal["keep", "revise", "remove_as_false_positive"]
     rationale: str = Field(min_length=1, max_length=4_000)
+    # Checked even when omitted, so the error names this field: a tool-call validation error without a field location
+    # is not shown to the model.
+    revision: FindingRevision | None = Field(default=None, validate_default=True)
+
+    @field_validator("revision")
+    @classmethod
+    def _check_revision(cls, revision: FindingRevision | None, info: ValidationInfo) -> FindingRevision | None:
+        decision = info.data.get("decision")
+        if decision is not None and (decision == "revise") != (revision is not None):
+            raise ValueError("a revision is required for a revise decision and not allowed for any other decision")
+        return revision
 
 
 class AssessmentDecision(BaseModel):
@@ -158,6 +178,8 @@ class DeliberationResult(BaseModel):
     model: str
     finding_decisions: list[FindingDecision] = Field(default_factory=list)
     assessment_decisions: list[AssessmentDecision] = Field(default_factory=list)
+    #: Findings the deliberator never decided, which are kept as the reviewers wrote them.
+    undecided_findings: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
@@ -182,7 +204,6 @@ class AggregatedFinding(BaseModel):
 
 
 class AggregationCandidate(BaseModel):
-    summary: str = Field(max_length=4_000)
     findings: list[AggregatedFinding] = Field(default_factory=list)
 
 
@@ -236,3 +257,7 @@ class ReviewPreview(BaseModel):
     reviewer_failures: list[ReviewerFailure] = Field(default_factory=list)
     mode: ReviewMode
     baseline_operation_id: str | None = None
+    min_severity: Severity = Severity.INFO
+    # Findings below min_severity are shown here for the human but are never published.
+    suppressed_findings: list[AggregatedFinding] = Field(default_factory=list)
+    suppression_note: str | None = None

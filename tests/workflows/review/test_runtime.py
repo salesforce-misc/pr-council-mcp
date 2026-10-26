@@ -35,6 +35,7 @@ from pr_council.review.models import (
     ReviewError,
     ReviewMode,
     ReviewSourceMode,
+    Severity,
 )
 from pr_council.workflows.review.runtime import ReviewRuntime
 
@@ -59,6 +60,7 @@ def _config(
     aggregation: str | None = None,
     models_per_disposition: int | None = None,
     concurrent_model_calls: int | None = None,
+    min_severity: Severity = Severity.INFO,
 ) -> Config:
     """Build a frozen :class:`Config`, overriding only the supplied fields.
 
@@ -85,6 +87,7 @@ def _config(
             allowed_hosts=allowed_hosts or ["github.com"],
             models=PRReviewModelsConfig(**models_kwargs),
             limits=PRReviewLimitsConfig(**limits_kwargs),
+            min_severity=min_severity,
         ),
     )
 
@@ -431,6 +434,30 @@ async def test_start_snapshots_per_operation_model_overrides(monkeypatch, tmp_pa
         assert record.request["aggregation_model"] == "claude-haiku-4-5-20251001"
     finally:
         await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
+
+
+async def test_start_snapshots_the_configured_or_overridden_min_severity(monkeypatch, tmp_path):
+    runtime = _runtime(_config(min_severity=Severity.MEDIUM), tmp_path / "state")
+    await asyncio.wait_for(runtime.start(), timeout=_TIMEOUT)
+    monkeypatch.setattr(runtime, "_spawn", lambda *args, **kwargs: None)
+    start = {
+        "pr_url": "https://github.com/acme/repo/pull/7",
+        "context": [],
+        "mode": ReviewMode.INITIAL,
+        "baseline_operation_id": None,
+        "iterations": 1,
+    }
+    try:
+        configured = await asyncio.wait_for(runtime.start_operation(**start), timeout=_TIMEOUT)
+        overridden = await asyncio.wait_for(runtime.start_operation(**start, min_severity="info"), timeout=_TIMEOUT)
+        with pytest.raises(ReviewError, match="min_severity must be one of: info, low, medium, high, critical"):
+            await asyncio.wait_for(runtime.start_operation(**start, min_severity="severe"), timeout=_TIMEOUT)
+    finally:
+        await asyncio.wait_for(runtime.close(), timeout=_TIMEOUT)
+
+    assert (configured.request["min_severity"], configured.request["min_severity_source"]) == ("medium", "config")
+    # An explicit override is recorded as one even when it lowers the threshold to the default.
+    assert (overridden.request["min_severity"], overridden.request["min_severity_source"]) == ("info", "override")
 
 
 async def test_start_accepts_uncatalogued_model(monkeypatch, tmp_path):

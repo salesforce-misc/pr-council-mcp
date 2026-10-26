@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 from pr_council.review.models import (
     AggregatedFinding,
     AssessmentDecision,
+    FindingDecision,
     PriorFindingAssessment,
     ReviewMetrics,
     Severity,
@@ -50,31 +51,54 @@ def normalize_prior_assessments(
     return normalized
 
 
+def _close_decisions[D: (FindingDecision, AssessmentDecision)](
+    decisions: Iterable[D], findings: Iterable[dict[str, object]], default: Callable[[str], D]
+) -> list[D]:
+    """Return one decision per finding, in finding order, discarding unknown and duplicate IDs."""
+    ordered_ids = unique(str(finding["id"]) for finding in findings)
+    allowed = set(ordered_ids)
+    by_id: dict[str, D] = {}
+    for decision in decisions:
+        if decision.finding_id in allowed and decision.finding_id not in by_id:
+            by_id[decision.finding_id] = decision
+    return [by_id[finding_id] if finding_id in by_id else default(finding_id) for finding_id in ordered_ids]
+
+
+def reconcile_finding_decisions(
+    decisions: Iterable[FindingDecision], findings: Iterable[dict[str, object]]
+) -> list[FindingDecision]:
+    """Close deliberation output over the ordered candidate finding set.
+
+    An undecided finding is kept as written: removal needs a deliberated disproof, and a revision its corrected claim.
+    """
+    return _close_decisions(
+        decisions,
+        findings,
+        lambda finding_id: FindingDecision(
+            finding_id=finding_id,
+            decision="keep",
+            rationale="The deliberator did not decide this finding, so it is kept as written.",
+        ),
+    )
+
+
 def reconcile_assessment_decisions(
     decisions: Iterable[AssessmentDecision], prior_findings: Iterable[dict[str, object]]
 ) -> list[AssessmentDecision]:
     """Close deliberation output over the ordered baseline finding set.
 
-    Unknown and duplicate IDs are discarded. A model omission is represented as
-    ``cannot_verify`` so follow-up publication never silently treats it as resolved.
+    A model omission is represented as ``cannot_verify`` so follow-up publication never silently treats it as
+    resolved.
     """
-    ordered_ids = unique(str(finding["id"]) for finding in prior_findings)
-    allowed = set(ordered_ids)
-    by_id: dict[str, AssessmentDecision] = {}
-    for decision in decisions:
-        if decision.finding_id in allowed and decision.finding_id not in by_id:
-            by_id[decision.finding_id] = decision
-    return [
-        by_id.get(
-            finding_id,
-            AssessmentDecision(
-                finding_id=finding_id,
-                status="cannot_verify",
-                rationale="The deliberator did not return an assessment for this baseline finding.",
-            ),
-        )
-        for finding_id in ordered_ids
-    ]
+    return _close_decisions(
+        decisions,
+        prior_findings,
+        lambda finding_id: AssessmentDecision(
+            finding_id=finding_id,
+            status="cannot_verify",
+            rationale="The deliberator did not return an assessment for this baseline finding.",
+        ),
+    )
 
 
 def canonical_json(value: object) -> str:
@@ -106,8 +130,60 @@ def render_summary_footer(models: dict[str, list[str]], *, deliberation_model: s
     for disposition, model_ids in models.items():
         rendered = " | ".join(f"`{model}`" for model in unique(model_ids)) or "(none)"
         lines.append(f"> {disposition.title()}: {rendered}")
-    lines.append(f"> Deliberation: `{deliberation_model}` · Summary: `{aggregation_model}`")
+    lines.append(f"> Deliberation: `{deliberation_model}` · Aggregation: `{aggregation_model}`")
     return "\n".join(lines)
+
+
+def _count(count: int, singular: str, plural: str, *, zero: str) -> str:
+    if count == 0:
+        return zero
+    return f"1 {singular}" if count == 1 else f"{count} {plural}"
+
+
+def render_review_summary(
+    findings: Iterable[AggregatedFinding],
+    *,
+    follow_up: Mapping[str, int] | None = None,
+) -> str:
+    """Render the top-level status from the published findings and follow-up counts alone.
+
+    The text is built from counts so it can never disagree with the comments it summarizes.
+    """
+    if follow_up is None:
+        blocking = sum(finding.severity in {Severity.CRITICAL, Severity.HIGH} for finding in findings)
+        if blocking == 0:
+            return "No critical or high-severity issues need to be addressed before merge."
+        noun = "issue needs" if blocking == 1 else "issues need"
+        return f"{blocking} critical or high-severity {noun} to be addressed before merge."
+    resolved = follow_up.get("resolved", 0)
+    unresolved = follow_up.get("still_present", 0) + follow_up.get("partially_resolved", 0)
+    unverified = follow_up.get("cannot_verify", 0)
+    if resolved + unresolved + unverified == 0:
+        prior = "No issues were previously reported."
+    else:
+        clauses = [
+            _count(
+                resolved,
+                "previously reported issue was resolved",
+                "previously reported issues were resolved",
+                zero="No previously reported issues were resolved",
+            ),
+            _count(unresolved, "remains unresolved", "remain unresolved", zero="none remain unresolved"),
+        ]
+        if unverified:
+            clauses.append(f"{unverified} could not be verified")
+        prior = "; ".join(clauses) + "."
+        # An unresolved issue below min_severity has no finding here; its earlier review's comment still stands.
+        if suppressed := follow_up.get("unresolved_suppressed", 0):
+            verb = "is" if suppressed == 1 else "are"
+            prior += f" {suppressed} of them {verb} below this review's severity threshold and not repeated."
+    new = _count(
+        follow_up.get("new", 0),
+        "new issue was found.",
+        "new issues were found.",
+        zero="No new issues were found.",
+    )
+    return f"{prior} {new}"
 
 
 def render_additional_findings(findings: Iterable[AggregatedFinding]) -> str:

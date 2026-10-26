@@ -21,14 +21,25 @@ read-only sandbox. Do not execute repository code or invoke package managers, la
 Use local Git and ordinary system utilities to inspect the repository. Other local Git exploration is permitted.
 Return only the requested structured result."""
 
+SEVERITY_RUBRIC = """Rate severity by the impact the evidence supports, not the worst case imaginable:
+- critical: an exploitable vulnerability, data loss or corruption, or an outage under normal use;
+- high: a realistic path to incorrect behavior, a crash, or a security weakness;
+- medium: incorrect behavior in edge cases, missing validation or error handling, a compatibility or reliability
+  risk, or missing tests for risky changed behavior;
+- low: maintainability, API consistency, documentation accuracy, or minor test gaps;
+- info: an observation that needs no change."""
+
 
 def review_safety_prompt(base_sha: str, head_sha: str) -> str:
-    """Add the trusted immutable comparison to the shared safety prompt."""
+    """Add the trusted immutable comparison and its scope to the shared safety prompt."""
     if not _OBJECT_ID_PATTERN.fullmatch(base_sha) or not _OBJECT_ID_PATTERN.fullmatch(head_sha):
         raise ValueError("review endpoints must be full hexadecimal object IDs")
     return (
         f"{BASE_SAFETY}\nThe canonical PR comparison is `git diff {base_sha.lower()}...{head_sha.lower()}`. "
-        "These commits were pinned and hydrated by the trusted review workflow."
+        "These commits were pinned and hydrated by the trusted review workflow. A renamed or moved file is in scope "
+        "for the effects of the move, even where no line differs: its relative references must resolve from its new "
+        "path, references elsewhere to its old path must be updated, and its content must suit where it is now used. "
+        "A defect in unchanged content that the move does not affect predates this PR and is out of scope."
     )
 
 
@@ -38,6 +49,14 @@ class Usage(BaseModel):
     total_tokens: int = 0
     complete: bool = True
     tool_calls: int = 0
+
+    def add(self, other: Usage) -> None:
+        """Accumulate another attempt's usage; the total is complete only if every attempt was."""
+        self.input_tokens += other.input_tokens
+        self.output_tokens += other.output_tokens
+        self.total_tokens += other.total_tokens
+        self.tool_calls += other.tool_calls
+        self.complete = self.complete and other.complete
 
 
 class ToolBudget:
@@ -84,8 +103,8 @@ def agent_recursion_limit(
 ) -> int:
     """Leave graph-transition headroom without changing the external-tool budget.
 
-    Each sequential tool call costs a model step, the result-submission hook, and a tools step; the fixed
-    overhead covers the submission middleware's capped correction rounds.
+    Each sequential tool call costs a model step, an after-model hook, and a tools step; the fixed overhead covers
+    the middleware's capped correction and reminder rounds.
     """
     return max(minimum, graph_steps_per_tool_call * max_tool_calls + fixed_overhead)
 

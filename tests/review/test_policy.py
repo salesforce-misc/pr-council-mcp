@@ -6,6 +6,7 @@ import pytest
 from pr_council.review.models import (
     AggregatedFinding,
     AssessmentDecision,
+    FindingDecision,
     PriorFindingAssessment,
     ReviewMetrics,
     Severity,
@@ -16,10 +17,12 @@ from pr_council.review.policy import (
     normalize_prior_assessments,
     payload_hash,
     reconcile_assessment_decisions,
+    reconcile_finding_decisions,
     render_additional_findings,
     render_comment_footer,
     render_comment_metadata,
     render_html_metadata,
+    render_review_summary,
     render_stats_comment,
     render_summary_footer,
 )
@@ -49,6 +52,21 @@ def test_assessment_decisions_are_closed_over_baseline_and_fill_omissions():
     assert [(item.finding_id, item.status) for item in normalized] == [
         ("first", "resolved"),
         ("second", "cannot_verify"),
+    ]
+
+
+def test_finding_decisions_are_closed_over_candidates_and_keep_undecided_findings():
+    decisions = [
+        FindingDecision(finding_id="unknown", decision="remove_as_false_positive", rationale="invented"),
+        FindingDecision(finding_id="second", decision="remove_as_false_positive", rationale="disproven"),
+        FindingDecision(finding_id="second", decision="keep", rationale="duplicate"),
+    ]
+
+    normalized = reconcile_finding_decisions(decisions, [{"id": "first"}, {"id": "second"}])
+
+    assert [(item.finding_id, item.decision, item.rationale) for item in normalized] == [
+        ("first", "keep", "The deliberator did not decide this finding, so it is kept as written."),
+        ("second", "remove_as_false_positive", "disproven"),
     ]
 
 
@@ -114,7 +132,8 @@ def test_render_summary_footer_labels_dispositions_and_dedupes_models():
         aggregation_model="s",
     )
     assert footer == (
-        "\n\n> 🤖 **pr-council-mcp**\n> Quality: `m-a` | `m-b`\n> Security: (none)\n> Deliberation: `d` · Summary: `s`"
+        "\n\n> 🤖 **pr-council-mcp**\n> Quality: `m-a` | `m-b`\n> Security: (none)"
+        "\n> Deliberation: `d` · Aggregation: `s`"
     )
 
 
@@ -190,3 +209,60 @@ def test_canonical_json_sorts_keys_and_omits_whitespace():
 
 def test_payload_hash_is_deterministic_sha256_of_canonical_json():
     assert payload_hash({"a": 1}) == "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862"
+
+
+def _severity_finding(severity: Severity) -> AggregatedFinding:
+    return AggregatedFinding(
+        id=f"f-{severity.value}",
+        title="T",
+        body="B",
+        severity=severity,
+        path="a.py",
+        line=1,
+        source_finding_ids=[f"s-{severity.value}"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("severities", "expected"),
+    [
+        ([], "No critical or high-severity issues need to be addressed before merge."),
+        (
+            [Severity.MEDIUM, Severity.LOW, Severity.INFO],
+            "No critical or high-severity issues need to be addressed before merge.",
+        ),
+        ([Severity.HIGH, Severity.MEDIUM], "1 critical or high-severity issue needs to be addressed before merge."),
+        ([Severity.CRITICAL, Severity.HIGH], "2 critical or high-severity issues need to be addressed before merge."),
+    ],
+)
+def test_render_review_summary_counts_blocking_initial_findings(severities, expected):
+    assert render_review_summary([_severity_finding(severity) for severity in severities]) == expected
+
+
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [
+        (
+            {"resolved": 2, "new": 1},
+            "2 previously reported issues were resolved; none remain unresolved. 1 new issue was found.",
+        ),
+        (
+            {"resolved": 1, "still_present": 1, "partially_resolved": 1, "new": 0},
+            "1 previously reported issue was resolved; 2 remain unresolved. No new issues were found.",
+        ),
+        (
+            {"still_present": 1, "cannot_verify": 2, "new": 3},
+            "No previously reported issues were resolved; 1 remains unresolved; 2 could not be verified. "
+            "3 new issues were found.",
+        ),
+        ({"new": 0}, "No issues were previously reported. No new issues were found."),
+        (
+            {"still_present": 2, "unresolved_suppressed": 1, "new": 0},
+            "No previously reported issues were resolved; 2 remain unresolved. 1 of them is below this review's "
+            "severity threshold and not repeated. No new issues were found.",
+        ),
+    ],
+)
+def test_render_review_summary_reports_follow_up_status_counts(counts, expected):
+    # Follow-up summaries are counts only; the findings themselves are never described here.
+    assert render_review_summary([_severity_finding(Severity.CRITICAL)], follow_up=counts) == expected

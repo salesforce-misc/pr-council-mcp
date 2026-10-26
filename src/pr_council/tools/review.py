@@ -10,7 +10,7 @@ from localmcp.observability.logging import get_logger
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from pr_council.review.models import OperationStatus, ReviewContextInput, ReviewMode, ReviewSourceMode
+from pr_council.review.models import OperationStatus, ReviewContextInput, ReviewMode, ReviewSourceMode, Severity
 from pr_council.workflows.review.runtime import review_runtime
 
 log = get_logger(__name__)
@@ -72,6 +72,15 @@ async def pr_council_start(
         str | None,
         Field(description="Optional per-operation aggregation-model override; omit to use [pr_review.models]."),
     ] = None,
+    min_severity: Annotated[
+        Severity | None,
+        Field(
+            description=(
+                "Optional per-operation publication threshold; findings below it are shown in the preview but never "
+                "posted. Omit to use [pr_review].min_severity."
+            )
+        ),
+    ] = None,
 ) -> dict[str, object]:
     """Queue a durable, comment-only PR review and return its operation handle.
 
@@ -91,6 +100,7 @@ async def pr_council_start(
         iterations=iterations,
         deliberation_model=deliberation_model,
         aggregation_model=aggregation_model,
+        min_severity=min_severity,
     )
     return {"operation_id": record.id, "label": record.label, "status": record.status.value}
 
@@ -138,7 +148,11 @@ async def pr_council_get(
 async def pr_council_preview(
     operation_id: Annotated[str, Field(description="Opaque operation ID returned by pr_council_start.")],
 ) -> dict[str, object]:
-    """Return the exact revision-bound summary and inline comments without posting them."""
+    """Return the exact revision-bound summary and inline comments without posting them.
+
+    When ``suppression_note`` is set, show it with ``suppressed_findings`` to the human: those findings fell below
+    ``min_severity`` and are never posted.
+    """
     return (await review_runtime().preview(operation_id)).model_dump(mode="json")
 
 

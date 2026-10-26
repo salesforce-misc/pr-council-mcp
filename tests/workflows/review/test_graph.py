@@ -17,6 +17,7 @@ from pr_council.review.models import (
     AssessmentDecision,
     Finding,
     FindingDecision,
+    FindingRevision,
     IterationCandidate,
     OperationStatus,
     PriorFindingAssessment,
@@ -249,7 +250,6 @@ async def fake_aggregate(model, **values):
     findings = values["findings"]
     first = findings[0]
     candidate = AggregationCandidate(
-        summary="Two reviewers found the same issue.",
         findings=[
             AggregatedFinding(
                 id="model-value-is-replaced",
@@ -264,7 +264,7 @@ async def fake_aggregate(model, **values):
             )
         ],
     )
-    return values["validate_candidate"](candidate), Usage(total_tokens=5)
+    return candidate, Usage(total_tokens=5)
 
 
 def _initial_graph_state(operation_id: str) -> dict[str, object]:
@@ -1043,3 +1043,282 @@ async def test_preview_warns_on_degraded_coverage_when_one_reviewer_fails(monkey
     assert [(item["disposition"], item["model"]) for item in failures] == [("quality", "model-fail")]
     assert "Review coverage degraded" in store.preview["summary_body"]
     assert "quality/model-fail" in store.preview["summary_body"]
+
+
+async def test_deliberation_revision_corrects_the_claim_without_changing_identity(monkeypatch, tmp_path):
+    _patch_graph_fakes(monkeypatch)
+
+    async def revise_quality_remove_security(model, sandbox_profile, base_sha, head_sha, **values):
+        decisions = []
+        for finding in values["findings"]:
+            if finding["disposition"] == "quality":
+                revision = FindingRevision(
+                    title="Narrower claim",
+                    body="Only empty input is affected.",
+                    severity=Severity.MEDIUM,
+                    evidence="app.py:1 handles every non-empty value.",
+                )
+                decisions.append(
+                    FindingDecision(
+                        finding_id=finding["id"], decision="revise", rationale="Overstated.", revision=revision
+                    )
+                )
+            else:
+                decisions.append(
+                    FindingDecision(
+                        finding_id=finding["id"], decision="remove_as_false_positive", rationale="Disproven."
+                    )
+                )
+        return DeliberationCandidate(finding_decisions=decisions), Usage(total_tokens=5)
+
+    monkeypatch.setattr(graph_module, "deliberate", revise_quality_remove_security)
+    store = FakeStore()
+    async with AsyncSqliteSaver.from_conn_string(os.fspath(tmp_path / "revise.sqlite3")) as checkpointer:
+        await checkpointer.setup()
+        graph = build_review_graph(_make_deps(tmp_path, store, FakeGit()), checkpointer)
+        paused = await graph.ainvoke(
+            _initial_state("operation-1", {"quality": ["model-a"], "security": ["model-b"]}),
+            config={"configurable": {"thread_id": "operation-1"}, "recursion_limit": 100},
+        )
+
+    [retained] = paused["retained_findings"]
+    assert retained["id"] == "quality-model-a"
+    assert (retained["path"], retained["line"], retained["model"]) == ("app.py", 1, "model-a")
+    assert (retained["title"], retained["body"], retained["severity"]) == (
+        "Narrower claim",
+        "Only empty input is affected.",
+        "medium",
+    )
+    assert retained["evidence"] == "app.py:1 handles every non-empty value."
+    # The reviewer's original claim is kept for comparison.
+    original = next(result for result in paused["reviewer_results"] if result["disposition"] == "quality")
+    assert (original["findings"][0]["title"], original["findings"][0]["severity"]) == ("Incorrect value", "high")
+    # Merged severity follows the corrected claim rather than the reviewer's original rating.
+    assert [comment["severity"] for comment in store.preview["comments"]] == ["medium"]
+    assert store.preview["metrics"]["results"]["revisedFindings"] == 1
+    assert store.preview["metrics"]["results"]["falsePositivesRemoved"] == 1
+    assert store.preview["summary"] == "No critical or high-severity issues need to be addressed before merge."
+
+
+class _RecordedLog:
+    def __init__(self):
+        self.events = []
+
+    def __getattr__(self, level):
+        return lambda event, **values: self.events.append((level, event, values))
+
+
+async def test_an_incomplete_deliberation_keeps_its_undecided_findings(monkeypatch, tmp_path):
+    _patch_graph_fakes(monkeypatch)
+    recorded_log = _RecordedLog()
+    monkeypatch.setattr(graph_module, "log", recorded_log)
+
+    async def decide_nothing(model, sandbox_profile, base_sha, head_sha, **values):
+        values["on_incomplete"](RuntimeError("context too long"))
+        return DeliberationCandidate(), Usage(total_tokens=5, tool_calls=2)
+
+    monkeypatch.setattr(graph_module, "deliberate", decide_nothing)
+    store = FakeStore()
+    async with AsyncSqliteSaver.from_conn_string(os.fspath(tmp_path / "incomplete.sqlite3")) as checkpointer:
+        await checkpointer.setup()
+        graph = build_review_graph(_make_deps(tmp_path, store, FakeGit()), checkpointer)
+        paused = await graph.ainvoke(
+            _initial_state("operation-1", {"quality": ["model-a"], "security": ["model-b"]}),
+            config={"configurable": {"thread_id": "operation-1"}, "recursion_limit": 100},
+        )
+
+    assert [finding["id"] for finding in paused["retained_findings"]] == ["quality-model-a", "security-model-b"]
+    assert [
+        (decision["decision"], decision["rationale"])
+        for result in paused["deliberation_results"]
+        for decision in result["finding_decisions"]
+    ] == [("keep", "The deliberator did not decide this finding, so it is kept as written.")] * 2
+    assert store.preview["metrics"]["reviewers"]["deliberatorToolCalls"] == 4
+    # The human approving the preview sees that these findings were never deliberated, not only the log.
+    assert [result["undecided_findings"] for result in paused["deliberation_results"]] == [1, 1]
+    assert store.preview["summary"].endswith(
+        "> ⚠️ **Deliberation incomplete:** 2 findings were not deliberated and kept as the reviewers wrote them."
+    )
+    events = [(level, event, values.get("disposition")) for level, event, values in recorded_log.events]
+    for disposition in ("quality", "security"):
+        assert ("warning", "review.deliberation_incomplete", disposition) in events
+        assert ("warning", "review.finding_decisions_defaulted", disposition) in events
+
+
+@pytest.mark.parametrize(
+    ("source", "description"),
+    [("config", "the configured `min_severity`"), ("override", "this review's `min_severity` override")],
+)
+async def test_findings_below_min_severity_are_previewed_but_never_published(
+    monkeypatch, tmp_path, source, description
+):
+    _patch_graph_fakes(monkeypatch)
+    store = FakeStore()
+    git = FakeGit()
+    state = _initial_state("operation-1", {"quality": ["model-a"], "security": ["model-b"]})
+    state["request"] |= {"min_severity": "critical", "min_severity_source": source}
+    graph_config = {"configurable": {"thread_id": "operation-1"}, "recursion_limit": 100}
+    async with AsyncSqliteSaver.from_conn_string(os.fspath(tmp_path / "threshold.sqlite3")) as checkpointer:
+        await checkpointer.setup()
+        graph = build_review_graph(_make_deps(tmp_path, store, git), checkpointer)
+        await graph.ainvoke(state, config=graph_config)
+        preview = store.preview
+        await graph.ainvoke(
+            Command(
+                resume={"action": "commit", "revision": preview["revision"], "payload_hash": preview["payload_hash"]}
+            ),
+            config=graph_config,
+        )
+
+    assert preview["min_severity"] == "critical"
+    assert preview["comments"] == []
+    assert [finding["severity"] for finding in preview["suppressed_findings"]] == ["high"]
+    assert preview["suppression_note"] == (
+        f"1 finding below critical severity was suppressed by {description} and will not be published."
+    )
+    assert preview["summary"] == "No critical or high-severity issues need to be addressed before merge."
+    assert "Incorrect value" not in preview["summary_body"]
+    results = preview["metrics"]["results"]
+    assert (results["aggregatedFindings"], results["suppressedFindings"], results["inlineComments"]) == (1, 1, 0)
+    assert git.posted[0]["comments"] == []
+    # Only published findings become a later follow-up's baseline.
+    assert store.result["findings"] == []
+    assert store.result["summary"] == preview["summary"]
+
+
+async def test_incomplete_aggregation_is_logged_and_shown_in_the_preview(monkeypatch, tmp_path):
+    _patch_graph_fakes(monkeypatch)
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    class RecordingLog:
+        def warning(self, event, **values):
+            warnings.append((event, values))
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    async def aggregate_incompletely(model, **values):
+        values["on_incomplete"](RuntimeError("context too long"))
+        return await fake_aggregate(model, **values)
+
+    monkeypatch.setattr(graph_module, "log", RecordingLog())
+    monkeypatch.setattr(graph_module, "aggregate", aggregate_incompletely)
+    store = FakeStore()
+    state = _initial_state("operation-1", {"quality": ["model-a"], "security": ["model-b"]})
+    graph_config = {"configurable": {"thread_id": "operation-1"}, "recursion_limit": 100}
+    async with AsyncSqliteSaver.from_conn_string(os.fspath(tmp_path / "incomplete.sqlite3")) as checkpointer:
+        await checkpointer.setup()
+        graph = build_review_graph(_make_deps(tmp_path, store, FakeGit()), checkpointer)
+        await graph.ainvoke(state, config=graph_config)
+
+    assert (
+        "review.aggregation_incomplete",
+        {
+            "operation_id": "operation-1",
+            "model": "model-s",
+            "error_type": "RuntimeError",
+        },
+    ) in warnings
+    assert len(store.preview["comments"]) == 1
+    assert "**Aggregation incomplete:**" in store.preview["summary"]
+    assert "Deliberation incomplete" not in store.preview["summary"]
+
+
+async def aggregate_separately(model, **values):
+    candidate = AggregationCandidate(
+        findings=[
+            AggregatedFinding(
+                id="replaced",
+                title=finding["title"],
+                body=finding["body"],
+                severity=finding["severity"],
+                path=finding["path"],
+                line=finding["line"],
+                source_finding_ids=[finding["id"]],
+            )
+            for finding in values["findings"]
+        ]
+    )
+    return candidate, Usage(total_tokens=5)
+
+
+def _baseline_operation(severity=Severity.HIGH):
+    baseline_finding = AggregatedFinding(
+        id="baseline-id",
+        title="Existing defect",
+        body="The original defect.",
+        severity=severity,
+        path="app.py",
+        line=1,
+        dispositions=["quality"],
+        reviewer_models=["model-a"],
+        source_finding_ids=["original-reviewer-id"],
+    )
+    return SimpleNamespace(
+        id="baseline-operation",
+        result={"context": [], "findings": [baseline_finding.model_dump(mode="json")]},
+    )
+
+
+async def test_follow_up_summary_counts_only_findings_not_carried_from_the_baseline(monkeypatch, tmp_path):
+    _patch_graph_fakes(monkeypatch)
+    monkeypatch.setattr(graph_module, "aggregate", aggregate_separately)
+    baseline = _baseline_operation()
+    store = FakeStore(baseline)
+    state = _initial_state("follow-up-operation", {"quality": ["model-a"], "security": ["model-b"]})
+    state["request"] |= {"mode": "follow_up", "baseline_operation_id": baseline.id}
+    async with AsyncSqliteSaver.from_conn_string(os.fspath(tmp_path / "follow-up.sqlite3")) as checkpointer:
+        await checkpointer.setup()
+        graph = build_review_graph(_make_deps(tmp_path, store, FakeGit()), checkpointer)
+        await graph.ainvoke(
+            state, config={"configurable": {"thread_id": "follow-up-operation"}, "recursion_limit": 100}
+        )
+
+    # Two reviewer findings are new; the third published finding carries the still-present baseline finding.
+    assert len(store.preview["comments"]) == 3
+    assert store.preview["metrics"]["follow_up"]["new"] == 2
+    assert store.preview["summary"] == (
+        "No previously reported issues were resolved; 1 remains unresolved. 2 new issues were found."
+    )
+
+
+async def test_a_suppressed_unresolved_prior_finding_is_disclosed_and_stays_tracked(monkeypatch, tmp_path):
+    _patch_graph_fakes(monkeypatch)
+    monkeypatch.setattr(graph_module, "aggregate", aggregate_separately)
+    baseline = _baseline_operation(Severity.LOW)
+    store = FakeStore(baseline)
+    git = FakeGit()
+    state = _initial_state("follow-up-operation", {"quality": ["model-a"], "security": ["model-b"]})
+    state["request"] |= {
+        "mode": "follow_up",
+        "baseline_operation_id": baseline.id,
+        "min_severity": "medium",
+        "min_severity_source": "override",
+    }
+    graph_config = {"configurable": {"thread_id": "follow-up-operation"}, "recursion_limit": 100}
+    async with AsyncSqliteSaver.from_conn_string(os.fspath(tmp_path / "follow-up.sqlite3")) as checkpointer:
+        await checkpointer.setup()
+        graph = build_review_graph(_make_deps(tmp_path, store, git), checkpointer)
+        await graph.ainvoke(state, config=graph_config)
+        preview = store.preview
+        await graph.ainvoke(
+            Command(
+                resume={"action": "commit", "revision": preview["revision"], "payload_hash": preview["payload_hash"]}
+            ),
+            config=graph_config,
+        )
+
+    # The low-severity prior finding is still present but below the threshold, so it has no comment of its own.
+    assert [finding["title"] for finding in preview["suppressed_findings"]] == ["Existing defect"]
+    assert len(git.posted[0]["comments"]) == 2
+    assert preview["metrics"]["follow_up"]["unresolved_suppressed"] == 1
+    assert preview["summary"] == (
+        "No previously reported issues were resolved; 1 remains unresolved. 1 of them is below this review's "
+        "severity threshold and not repeated. 2 new issues were found."
+    )
+    # An earlier review published it, so the next follow-up still assesses it.
+    assert [finding["title"] for finding in store.result["findings"]] == [
+        "Incorrect value",
+        "Incorrect value",
+        "Existing defect",
+    ]

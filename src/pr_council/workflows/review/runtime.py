@@ -29,6 +29,7 @@ from pr_council.review.models import (
     ReviewMode,
     ReviewPreview,
     ReviewSourceMode,
+    Severity,
 )
 from pr_council.review.store import OperationRecord, OperationStore
 from pr_council.workflows.review.graph import ReviewCancelled, ReviewGraphDeps, build_review_graph
@@ -192,6 +193,7 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
         models: dict[str, list[str]] | None = None,
         deliberation_model: str | None = None,
         aggregation_model: str | None = None,
+        min_severity: Severity | str | None = None,
     ) -> OperationRecord:
         store = self._require_store()
         ref = parse_pr_url(pr_url, allowed_hosts=self.config.pr_review.allowed_hosts)
@@ -208,6 +210,12 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
         owner_uid = os.getuid()
         if iterations < 1 or iterations > 10:
             raise ReviewError("review iterations must be between 1 and 10")
+        try:
+            resolved_min_severity = Severity(
+                self.config.pr_review.min_severity if min_severity is None else min_severity
+            )
+        except ValueError as exc:
+            raise ReviewError(f"min_severity must be one of: {', '.join(Severity)}") from exc
         configured_models = self.config.pr_review.models
         resolved_models = (
             {
@@ -282,6 +290,8 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
             "source_tool_timeout_seconds": self.config.pr_review.limits.source_tool_timeout_seconds,
             "deliberation_model": resolved_deliberation_model,
             "aggregation_model": resolved_aggregation_model,
+            "min_severity": resolved_min_severity.value,
+            "min_severity_source": "config" if min_severity is None else "override",
         }
         record = await store.create(
             operation_id=operation_id,

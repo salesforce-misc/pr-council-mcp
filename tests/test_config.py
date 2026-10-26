@@ -3,6 +3,7 @@ from localmcp.config import ServerConfig
 from pydantic import ValidationError
 
 from pr_council.config import ConfigError, PRReviewLimitsConfig, PRReviewModelsConfig, parse_config
+from pr_council.review.models import Severity
 
 
 def test_empty_application_config_uses_defaults() -> None:
@@ -13,6 +14,19 @@ def test_empty_application_config_uses_defaults() -> None:
     assert config.pr_review.models.deliberation == "claude-opus-5-5"
     assert config.pr_review.models.aggregation == "claude-sonnet-5"
     assert config.pr_review.allowed_hosts == ["github.com"]
+    assert config.pr_review.min_severity == Severity.INFO
+    assert config.pr_review.limits.deliberator_tool_calls_per_disposition == 20
+
+
+def test_parse_config_reads_min_severity() -> None:
+    config = parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"min_severity": "medium"}}))
+
+    assert config.pr_review.min_severity == Severity.MEDIUM
+
+
+def test_parse_config_rejects_unknown_min_severity() -> None:
+    with pytest.raises(ConfigError, match="invalid application configuration"):
+        parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"min_severity": "severe"}}))
 
 
 def test_parse_config_accepts_enterprise_github_host() -> None:

@@ -45,8 +45,9 @@ The current modules are organized as follows:
   - `store.py` owns the durable operation catalog beside LangGraph's checkpoint database.
 - **`pr_council/agents/review/`** — the reviewer, closed-set deliberator, and aggregator. Role-specific prompt text
   is colocated with its owning agent module. `common.py` owns the shared safety prompt builder, tool budgets, and usage
-  accounting; model-call retry and rate-limit backoff come from `localmcp.retry`. Repository content, diffs, tool
-  output, prior findings, and caller context are always untrusted data.
+  accounting; `recording.py` owns the incremental-recording agent loop shared by the deliberator and aggregator;
+  model-call retry and rate-limit backoff come from `localmcp.retry`. Repository content, diffs, tool output, prior
+  findings, and caller context are always untrusted data.
 - **`localmcp.workflows.runtime.WorkflowRuntime`** owns state-directory permissions, store/checkpointer lifecycle,
   operation leases and heartbeats, background-task tracking, and recovery scheduling. Domain subclasses own graph
   construction, cancellation mapping, and domain-resource cleanup.
@@ -154,10 +155,10 @@ publishing comments against a different revision.
 
 ### Agent sandbox
 
-Reviewer and deliberator agents receive exactly one bounded `Bash` tool. Their profile contains two read-only roots:
-the selected source tree first (therefore `cwd`) and its validated common Git metadata directory second. This permits
-ordinary local `git`, `rg`, `sed`, `awk`, and other system inspection utilities without maintaining a bespoke set of
-read/list/search/diff tools.
+Reviewer and deliberator agents receive exactly one bounded `Bash` tool for source inspection. Its profile contains
+two read-only roots: the selected source tree first (therefore `cwd`) and its validated common Git metadata directory
+second. This permits ordinary local `git`, `rg`, `sed`, `awk`, and other system inspection utilities without
+maintaining a bespoke set of read/list/search/diff tools.
 
 Seatbelt, not command curation, is the security boundary:
 
@@ -176,9 +177,34 @@ trusted review layer constructs root grants and embeds validated base/head liter
 ### Review roles and follow-ups
 
 Quality and security reviewer matrices execute independently for the configured number of refinement iterations.
-Each disposition then receives a closed-set deliberation pass; aggregation may merge overlapping retained findings
-but cannot introduce new source-finding IDs. Deterministic validation derives sensitive metadata from source findings
-rather than trusting model output.
+Reviewer and deliberator prompts share one severity rubric and one scope: a renamed or moved file is in scope for the
+effects of the move even when no line changes, such as relative references that no longer resolve, references to its
+old path, or content that does not suit its new location. A defect in unchanged content that the move does not affect
+predates the PR and is out of scope, as it would be for a human reading the diff. Each disposition then receives a
+closed-set deliberation pass that keeps, revises, or removes every finding. Removal is only for a disproven defect. A
+revision corrects the title, body, severity, and evidence of a real but misstated defect while its ID and location
+stay fixed; the reviewer's original remains in the reviewer results. Deliberation does not remove duplicates, so
+aggregation can credit every model that found an issue. The aggregator merges findings that describe the same defect,
+one that a single change at one location fixes; findings in different places that each need their own change stay
+separate. Findings it does not merge are published exactly as deliberated, and it cannot introduce new source-finding
+IDs. Deterministic validation derives sensitive metadata, including merged severity, from source findings rather than
+trusting model output.
+
+The deliberator and aggregator are recording agents: each decision, prior-finding assessment, or merge is its own
+tool call, validated as it arrives against a closed ID set, so no single response carries the whole result and a
+rejected call records nothing. When a response reaches the output limit, its final call is rejected for the model to
+record again; a response cut off before any call, or a deliberator reply that stops with IDs unrecorded, is answered
+with what remains, a bounded number of times. A deterministic failure keeps what was already recorded; a failure
+before anything is recorded, such as a rejected credential or model, fails the operation instead. The graph then
+closes deliberation over the supplied IDs: an undecided finding is kept as written and an unassessed prior finding
+becomes `cannot_verify`, both logged. The summary warns when findings went undeliberated or aggregation ended early.
+
+The top-level summary is rendered in code from counts of the published findings and follow-up assessments; no model
+writes it. `[pr_review].min_severity` (default `info`), or the start tool's per-operation override, sets the lowest
+severity that is published. Findings below it are listed in the preview with a suppression note and excluded from the
+comments, summary counts, payload hash, and the completed result that later follow-ups use as their baseline. The
+exception is a suppressed finding that carries forward an unresolved prior finding: an earlier review published it,
+so it stays in that baseline, and the summary reports how many unresolved issues fall below the threshold.
 
 `auto` mode uses the latest completed review by the same local owner for the same PR as a baseline when available.
 `initial` forbids a baseline. `follow_up` requires one. Follow-ups compare context snapshots and require each relevant
@@ -223,7 +249,8 @@ backend cannot route or whose credential is missing.
 
 `[pr_review.models]` owns the quality/security reviewer lists and the deliberation/aggregation role models. The start
 tool accepts optional per-operation overrides; the runtime validates, deduplicates, bounds, and persists the resolved
-selection so later config changes cannot alter an in-flight operation.
+selection so later config changes cannot alter an in-flight operation. The resolved `min_severity` and whether it came
+from config or an override are persisted the same way.
 
 `[pr_review.limits]` bounds per-pass and operation-wide Bash calls, output tokens, matrix size, model concurrency,
 prepared repository size, command timeout, model retries, and retry delays. The operation-wide tool counter is

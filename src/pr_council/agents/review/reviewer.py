@@ -16,6 +16,7 @@ from localmcp.structured_output import SubmitResultMiddleware
 from pydantic import BaseModel, Field
 
 from pr_council.agents.review.common import (
+    SEVERITY_RUBRIC,
     ToolBudget,
     Usage,
     agent_recursion_limit,
@@ -25,9 +26,12 @@ from pr_council.agents.review.common import (
 from pr_council.review.models import Finding, IterationCandidate, PriorFindingAssessment, Severity
 
 _DISPOSITION_PROMPTS = {
-    "quality": """Review for concrete correctness, reliability, maintainability, compatibility, test coverage, and
-alignment with the supplied context. Report only actionable defects introduced or exposed by this PR, not style
-preferences. A finding needs a precise changed-file location and evidence.""",
+    "quality": """Review for concrete correctness, reliability, maintainability, API and interface design,
+compatibility, test coverage, documentation accuracy, and alignment with the supplied context. Report actionable
+issues introduced or exposed by this PR at any severity, including dead or redundant code, values written but never
+read, duplicated logic likely to drift, hardcoded values that bypass an existing mechanism, inconsistent or unwired
+interfaces, and documentation, comments, examples, or messages that are wrong about the changed behavior. Do not
+report formatting or naming preferences. A finding needs a precise changed-file location and evidence.""",
     "security": """Review for concrete security vulnerabilities, unsafe trust boundaries, injection, authorization,
 authentication, sensitive-data exposure, cryptographic misuse, and denial-of-service risks. Trace relevant data
 flows before reporting. Avoid speculative findings without an exploitable or realistic failure path.""",
@@ -75,6 +79,7 @@ class ReviewerAgent:
             ),
             system_prompt=(
                 f"{review_safety_prompt(base_sha, head_sha)}\n\n{_DISPOSITION_PROMPTS[disposition]}\n\n"
+                f"{SEVERITY_RUBRIC}\n\n"
                 f"You have at most {tool_budget.max_calls} source-tool calls in this pass. "
                 "Every tool result reports the remaining budget. Submit your result before "
                 "it is exhausted."
