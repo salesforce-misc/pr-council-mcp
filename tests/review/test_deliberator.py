@@ -89,8 +89,10 @@ def _tool_replies(request: list[Any]) -> dict[str, Any]:
 
 
 async def test_each_decision_and_assessment_is_recorded_as_it_arrives(scripted_model, run_recorder, tmp_path):
+    # The calls of one turn run concurrently in no fixed order, so each gets its own turn for its progress to be fixed.
     model = scripted_model(
-        _turn(_decide("b", "revise", revision=_REVISION), _decide("a")),
+        _turn(_decide("b", "revise", revision=_REVISION)),
+        _turn(_decide("a")),
         _turn(_assess("p")),
         _done(),
     )
@@ -107,18 +109,20 @@ async def test_each_decision_and_assessment_is_recorded_as_it_arrives(scripted_m
     assert candidate.finding_decisions[1].revision is not None
     assert candidate.finding_decisions[1].revision.title == "Narrower claim"
     assert [(item.finding_id, item.status) for item in candidate.assessment_decisions] == [("p", "still_present")]
-    replies = _tool_replies(model.requests[1])
-    assert replies["decide-b"].content == (
+    assert _tool_replies(model.requests[1])["decide-b"].content == (
         "Recorded revise for b. 1 findings still need a decision and 1 prior findings still need an assessment."
     )
-    assert replies["decide-a"].content == "Recorded keep for a. 1 prior findings still need an assessment."
     assert (
-        _tool_replies(model.requests[2])["assess-p"].content == "Recorded still_present for p. Everything is recorded."
+        _tool_replies(model.requests[2])["decide-a"].content
+        == "Recorded keep for a. 1 prior findings still need an assessment."
+    )
+    assert (
+        _tool_replies(model.requests[3])["assess-p"].content == "Recorded still_present for p. Everything is recorded."
     )
     assert model.bound[0]["tools"] == ["Bash", "decide_finding", "assess_prior_finding"]
     assert model.bound[0].get("tool_choice") is None
     assert run_recorder.run_names == ["pr-review-deliberator-quality-agent"]
-    assert run_recorder.starts == 3
+    assert run_recorder.starts == 4
     prompt = " ".join(model.requests[0][0].content.split())
     assert "Do not remove a finding whose defect is real but overstated; revise it instead." in prompt
     assert "Duplicates are not false positives" in prompt
