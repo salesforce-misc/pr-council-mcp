@@ -1,4 +1,5 @@
 import os
+from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 
@@ -7,7 +8,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
 import pr_council.workflows.review.graph as graph_module
-from pr_council.agents.review.common import Usage
+from pr_council.agents.review.common import ToolBudget, Usage
 from pr_council.agents.review.deliberator import DeliberationCandidate
 from pr_council.config import Config
 from pr_council.review.git import LocalSourceSnapshot
@@ -39,12 +40,12 @@ class FakeModelOwner:
 
 
 class FakeModelFactory:
-    def __init__(self, output_limits=None) -> None:
-        self.output_limits = output_limits
+    def __init__(self, calls=None) -> None:
+        self.calls = calls
 
     def create(self, model_id, *, max_output_tokens=None, reasoning_effort=None):
-        if self.output_limits is not None:
-            self.output_limits.append(max_output_tokens)
+        if self.calls is not None:
+            self.calls.append((model_id, max_output_tokens, reasoning_effort))
         return FakeModelOwner()
 
 
@@ -53,15 +54,10 @@ class FakeStore:
         self.statuses = []
         self.preview = None
         self.result = None
-        self.tool_calls = 0
         self.baseline = baseline
 
     async def is_cancel_requested(self, operation_id):
         return False
-
-    async def claim_tool_call(self, operation_id, limit):
-        self.tool_calls += 1
-        return limit - self.tool_calls
 
     async def update(self, operation_id, **values):
         if values.get("status"):
@@ -277,8 +273,6 @@ def _initial_graph_state(operation_id: str) -> dict[str, object]:
             "context": [],
             "models": {"quality": ["model-a"], "security": ["model-b"]},
             "iterations": 1,
-            "operation_tool_limit": 300,
-            "model_output_tokens_per_call": 8_000,
             "deliberation_model": "model-d",
             "aggregation_model": "model-s",
         },
@@ -372,9 +366,9 @@ async def test_graph_checkpoints_preview_then_resumes_comment_only_commit(
     monkeypatch.setattr(graph_module, "ReviewerAgent", FakeReviewerAgent)
     monkeypatch.setattr(graph_module, "deliberate", fake_deliberate)
     monkeypatch.setattr(graph_module, "aggregate", fake_aggregate)
-    output_limits = []
+    model_calls = []
 
-    model_factory = FakeModelFactory(output_limits)
+    model_factory = FakeModelFactory(model_calls)
 
     config = Config()
     store = FakeStore()
@@ -412,10 +406,11 @@ async def test_graph_checkpoints_preview_then_resumes_comment_only_commit(
                 "context": [],
                 "models": {"quality": ["model-a"], "security": ["model-b"]},
                 "iterations": 2,
-                "operation_tool_limit": 300,
-                "model_output_tokens_per_call": 8_000,
                 "deliberation_model": "model-d",
                 "aggregation_model": "model-s",
+                "review_efforts": {"model-a": "xhigh", "model-b": None},
+                "deliberation_effort": "medium",
+                "aggregation_effort": "low",
             },
             "ref": {"host": "github.com", "owner": "org", "repo": "repo", "number": 7},
             "reviewer_results": [],
@@ -433,7 +428,13 @@ async def test_graph_checkpoints_preview_then_resumes_comment_only_commit(
         assert "<!-- pr-council-mcp-operation" in store.preview["summary_body"]
         assert store.preview["metrics"]["reviewers"]["iterationsCompleted"] == 4
         assert store.preview["metrics"]["total_tokens"] == 55
-        assert output_limits == [8_000] * 7
+        # Each role runs at its persisted effort, and no call caps the model's output.
+        assert Counter(model_calls) == {
+            ("model-a", None, "xhigh"): 2,
+            ("model-b", None, None): 2,
+            ("model-d", None, "medium"): 2,
+            ("model-s", None, "low"): 1,
+        }
 
     async with AsyncSqliteSaver.from_conn_string(os.fspath(checkpoint_path)) as restarted_checkpointer:
         await restarted_checkpointer.setup()
@@ -547,8 +548,6 @@ async def test_follow_up_aggregation_uses_synthetic_retained_id(monkeypatch, tmp
                     "context": [],
                     "models": {"quality": ["model-a"], "security": ["model-b"]},
                     "iterations": 1,
-                    "operation_tool_limit": 300,
-                    "model_output_tokens_per_call": 8_000,
                     "deliberation_model": "model-d",
                     "aggregation_model": "model-s",
                 },
@@ -594,17 +593,17 @@ async def test_reviewer_retries_after_rate_limit_and_recovers(monkeypatch, tmp_p
         worktrees_dir=tmp_path / "worktrees",
     )
 
-    # Record each budget allocation's local limit to prove every retry attempt gets a
-    # fresh ToolBudget rather than reusing (and re-charging) one instance. Reviewers use
-    # reviewer_tool_calls_per_iteration (12); deliberators use a different limit (8).
+    # Record each budget allocation's limit to prove every retry attempt gets a fresh
+    # ToolBudget rather than reusing (and re-charging) one instance. Reviewers use
+    # reviewer_tool_calls_per_iteration; deliberators use a different limit.
     budget_local_limits: list[int] = []
-    original_tool_budget = deps.tool_budget
 
-    def counting_tool_budget(operation_id, local_limit, operation_limit):
-        budget_local_limits.append(local_limit)
-        return original_tool_budget(operation_id, local_limit, operation_limit)
+    class CountingToolBudget(ToolBudget):
+        def __init__(self, max_calls):
+            budget_local_limits.append(max_calls)
+            super().__init__(max_calls)
 
-    monkeypatch.setattr(deps, "tool_budget", counting_tool_budget)
+    monkeypatch.setattr(graph_module, "ToolBudget", CountingToolBudget)
 
     async with AsyncSqliteSaver.from_conn_string(os.fspath(tmp_path / "retry.sqlite3")) as checkpointer:
         await checkpointer.setup()
@@ -619,8 +618,6 @@ async def test_reviewer_retries_after_rate_limit_and_recovers(monkeypatch, tmp_p
                     "context": [],
                     "models": {"quality": ["model-a"], "security": ["model-b"]},
                     "iterations": 1,
-                    "operation_tool_limit": 300,
-                    "model_output_tokens_per_call": 8_000,
                     "deliberation_model": "model-d",
                     "aggregation_model": "model-s",
                 },
@@ -644,8 +641,8 @@ async def test_reviewer_retries_after_rate_limit_and_recovers(monkeypatch, tmp_p
     # A reused budget would allocate only 2, so this pins the fresh-per-attempt fix.
     reviewer_limit = config.pr_review.limits.reviewer_tool_calls_per_iteration
     assert budget_local_limits.count(reviewer_limit) == 3
-    # The failed attempt spent tool budget the durable store already billed; the
-    # recovered result must fold it in rather than reporting only the retry's spend.
+    # The failed attempt spent tool budget; the recovered result must fold it in
+    # rather than reporting only the retry's spend.
     assert metrics["reviewerToolCalls"] == FlakyReviewerAgent.FAILED_TOOL_CALLS
 
 
@@ -687,8 +684,6 @@ async def test_reviewer_does_not_retry_non_retryable_error(monkeypatch, tmp_path
                         "context": [],
                         "models": {"quality": ["model-a"], "security": ["model-b"]},
                         "iterations": 1,
-                        "operation_tool_limit": 300,
-                        "model_output_tokens_per_call": 8_000,
                         "deliberation_model": "model-d",
                         "aggregation_model": "model-s",
                     },
@@ -727,8 +722,6 @@ def _initial_state(operation_id, models):
             "context": [],
             "models": models,
             "iterations": 1,
-            "operation_tool_limit": 300,
-            "model_output_tokens_per_call": 8_000,
             "deliberation_model": "model-d",
             "aggregation_model": "model-s",
         },

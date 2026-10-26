@@ -15,7 +15,10 @@ def test_empty_application_config_uses_defaults() -> None:
     assert config.pr_review.models.aggregation == "claude-sonnet-5"
     assert config.pr_review.allowed_hosts == ["github.com"]
     assert config.pr_review.min_severity == Severity.INFO
+    assert config.pr_review.limits.reviewer_tool_calls_per_iteration == 12
     assert config.pr_review.limits.deliberator_tool_calls_per_disposition == 20
+    effort = config.pr_review.reasoning_effort
+    assert (effort.review, effort.deliberation, effort.aggregation) == ("medium", "medium", "medium")
 
 
 def test_parse_config_reads_min_severity() -> None:
@@ -27,6 +30,25 @@ def test_parse_config_reads_min_severity() -> None:
 def test_parse_config_rejects_unknown_min_severity() -> None:
     with pytest.raises(ConfigError, match="invalid application configuration"):
         parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"min_severity": "severe"}}))
+
+
+def test_parse_config_reads_reasoning_effort_and_rejects_unknown_levels() -> None:
+    config = parse_config(
+        ServerConfig(name="pr-council-mcp", values={"pr_review": {"reasoning_effort": {"review": "max"}}})
+    )
+
+    assert config.pr_review.reasoning_effort.review == "max"
+    assert config.pr_review.reasoning_effort.deliberation == "medium"
+    with pytest.raises(ConfigError, match="invalid application configuration"):
+        parse_config(
+            ServerConfig(name="pr-council-mcp", values={"pr_review": {"reasoning_effort": {"review": "extreme"}}})
+        )
+
+
+@pytest.mark.parametrize("key", ["operation_tool_calls", "model_output_tokens_per_call"])
+def test_parse_config_rejects_retired_limits(key: str) -> None:
+    with pytest.raises(ConfigError, match=key):
+        parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"limits": {key: 100}}}))
 
 
 def test_parse_config_accepts_enterprise_github_host() -> None:

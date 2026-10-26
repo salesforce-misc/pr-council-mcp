@@ -240,11 +240,14 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
         configured_model_ids.extend((resolved_deliberation_model, resolved_aggregation_model))
         if any(not _MODEL_ID.fullmatch(model) for model in configured_model_ids):
             raise ReviewError("model IDs may contain only letters, numbers, dot, underscore, colon, slash, and dash")
-        for model_id in configured_model_ids:
-            try:
-                self.model_factory.validate(model_id)
-            except ModelConfigurationError as exc:
-                raise ReviewError(str(exc)) from exc
+        efforts = self.config.pr_review.reasoning_effort
+        review_efforts = {
+            model_id: self._resolve_reasoning_effort(model_id, efforts.review)
+            for values in resolved_models.values()
+            for model_id in values
+        }
+        deliberation_effort = self._resolve_reasoning_effort(resolved_deliberation_model, efforts.deliberation)
+        aggregation_effort = self._resolve_reasoning_effort(resolved_aggregation_model, efforts.aggregation)
         github_account = self.git.account_for(ref)
         if github_account is not None:
             # Fail before any review work when the mapped account cannot act on this host.
@@ -284,12 +287,13 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
             ),
             "models": resolved_models,
             "iterations": iterations,
-            "operation_tool_limit": self.config.pr_review.limits.operation_tool_calls,
-            "model_output_tokens_per_call": self.config.pr_review.limits.model_output_tokens_per_call,
             "concurrent_model_calls": self.config.pr_review.limits.concurrent_model_calls,
             "source_tool_timeout_seconds": self.config.pr_review.limits.source_tool_timeout_seconds,
             "deliberation_model": resolved_deliberation_model,
             "aggregation_model": resolved_aggregation_model,
+            "review_efforts": review_efforts,
+            "deliberation_effort": deliberation_effort,
+            "aggregation_effort": aggregation_effort,
             "min_severity": resolved_min_severity.value,
             "min_severity_source": "config" if min_severity is None else "override",
         }
@@ -304,6 +308,14 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
         )
         self._spawn(operation_id)
         return record
+
+    def _resolve_reasoning_effort(self, model_id: str, effort: str) -> str | None:
+        """Validate a selected model and return the role's effort, or ``None`` for a model that takes none."""
+        try:
+            spec = self.model_factory.validate(model_id)
+        except ModelConfigurationError as exc:
+            raise ReviewError(str(exc)) from exc
+        return effort if spec.supports_reasoning_effort else None
 
     def _resolve_local_source_path(self, value: object) -> Path:
         if value is not None and not isinstance(value, str):

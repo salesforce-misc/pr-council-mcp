@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langchain_core.callbacks import UsageMetadataCallbackHandler
@@ -60,25 +59,17 @@ class Usage(BaseModel):
 
 
 class ToolBudget:
-    """Concurrency-safe local budget with an optional durable global claim."""
+    """Concurrency-safe source-tool budget for one agent pass."""
 
-    def __init__(self, max_calls: int, global_claim: Callable[[], Awaitable[int | None]] | None = None):
+    def __init__(self, max_calls: int):
         self.max_calls = max_calls
         self.used = 0
-        self._global_claim = global_claim
-        self._operation_remaining: int | None = None
         self._lock = asyncio.Lock()
 
     async def claim(self) -> tuple[bool, str | None]:
         async with self._lock:
             if self.used >= self.max_calls:
                 return False, "agent"
-            if self._global_claim is not None:
-                operation_remaining = await self._global_claim()
-                if operation_remaining is None:
-                    self._operation_remaining = 0
-                    return False, "operation"
-                self._operation_remaining = operation_remaining
             self.used += 1
             return True, None
 
@@ -88,7 +79,6 @@ class ToolBudget:
             "used": self.used,
             "remaining": max(0, self.max_calls - self.used),
             "remaining_scope": "agent_pass",
-            "operation_remaining": self._operation_remaining,
             "exhausted": exhausted_scope is not None,
             "exhausted_scope": exhausted_scope,
         }

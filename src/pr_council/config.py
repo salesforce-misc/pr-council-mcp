@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from localmcp.config import ServerConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -16,6 +17,7 @@ _HOSTNAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a
 _GITHUB_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 _GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$")
 DEFAULT_ALLOWED_HOSTS = ("github.com",)
+ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
 class ConfigError(PrCouncilError):
@@ -25,10 +27,8 @@ class ConfigError(PrCouncilError):
 class PRReviewLimitsConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    reviewer_tool_calls_per_iteration: int = Field(default=12, ge=1, le=20)
+    reviewer_tool_calls_per_iteration: int = Field(default=12, ge=1, le=100)
     deliberator_tool_calls_per_disposition: int = Field(default=20, ge=1, le=20)
-    operation_tool_calls: int = Field(default=300, ge=1, le=1_000)
-    model_output_tokens_per_call: int = Field(default=8_000, ge=256, le=32_000)
     models_per_disposition: int = Field(default=10, ge=1, le=10)
     concurrent_model_calls: int = Field(default=4, ge=1, le=20)
     repository_size_mib: int = Field(default=5_120, ge=100, le=102_400)
@@ -76,11 +76,25 @@ class PRReviewModelsConfig(BaseModel):
         return value
 
 
+class PRReviewReasoningEffortConfig(BaseModel):
+    """Per-role reasoning effort, applied to each selected model that accepts one.
+
+    The provider remains the authority on which levels a model supports.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    review: ReasoningEffort = "medium"
+    deliberation: ReasoningEffort = "medium"
+    aggregation: ReasoningEffort = "medium"
+
+
 class PRReviewConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS), min_length=1, max_length=20)
     models: PRReviewModelsConfig = Field(default_factory=PRReviewModelsConfig)
+    reasoning_effort: PRReviewReasoningEffortConfig = Field(default_factory=PRReviewReasoningEffortConfig)
     limits: PRReviewLimitsConfig = Field(default_factory=PRReviewLimitsConfig)
     # Findings below this severity are listed in the preview but never published.
     min_severity: Severity = Severity.INFO
