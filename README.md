@@ -24,6 +24,24 @@ the server publish inline comments and a `COMMENT`-only summary to GitHub.
 > **Status: early development (alpha).** The design, tool surface, and configuration are still changing and may
 > break between versions. Expect rough edges, and expect the interfaces to evolve as both tracks are explored.
 
+## Benchmark
+
+Review quality is measured with [ReviewBench](https://github.com/review-bench/ReviewBench), an open benchmark of real
+pull requests with human-reviewed golden findings, whose [leaderboard](https://review-bench.ai) ranks reviewers by
+grounded F1. Early results on its 25-PR test set look promising. With the default configuration, 0.6.0 scored:
+
+| Version | PRs | GF1 | GP | GR | AF1 | AP | AR |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.6.0 | 25 | 61.8 | 87.8 | 47.7 | 73.8 | 92.9 | 61.3 |
+
+Grounded F1, precision, and recall (GF1, GP, GR) count only matches against the golden set. Augmented scores (AF1, AP,
+AR) also count findings outside it, as the judge classifies them. Scores pool every finding across the 25 PRs.
+
+> **Early indicator only.** These come from a single offline run over the 25-PR test subset, judged locally with the
+> leaderboard's judge model. They are not a leaderboard result: the leaderboard scores all 219 PRs three times, and
+> ReviewBench does not accept offline results for it. See [`evals/experiments.md`](evals/experiments.md) for the full
+> results and [`evals/reviewbench/`](evals/reviewbench/README.md) to reproduce them.
+
 ## Quickstart
 
 The server currently runs on macOS and requires Python 3.12+. Install
