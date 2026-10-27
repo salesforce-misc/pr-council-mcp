@@ -98,6 +98,7 @@ class GraphState(TypedDict, total=False):
     prior_assessments: list[dict[str, Any]]
     aggregation: dict[str, Any]
     aggregation_usage: dict[str, Any]
+    aggregation_retries: int
     aggregation_incomplete: bool
     preview: dict[str, Any]
     decision: dict[str, Any]
@@ -719,6 +720,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             total_tokens=usage.total_tokens,
             token_accounting_complete=usage.complete,
             tool_calls=usage.tool_calls,
+            retries=retries.count,
         )
         severities = {finding["id"]: finding["severity"] for finding in findings}
         for decision in result.finding_decisions:
@@ -860,6 +862,7 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             "prior_assessments": assessments,
             "aggregation": normalized.model_dump(mode="json"),
             "aggregation_usage": usage.model_dump(),
+            "aggregation_retries": retries.count,
             "aggregation_incomplete": incomplete,
             "timing": timing,
         }
@@ -1199,7 +1202,12 @@ def _build_preview(state: GraphState) -> ReviewPreview:
             + sum(result.tool_calls for result in deliberations),
             "reviewerToolCalls": sum(result.tool_calls for result in reviewers),
             "deliberatorToolCalls": sum(result.tool_calls for result in deliberations),
-            "retries": sum(result.retries for result in reviewers),
+            "retries": sum(result.retries for result in reviewers)
+            + sum(result.retries for result in deliberations)
+            + state.get("aggregation_retries", 0),
+            "reviewerRetries": sum(result.retries for result in reviewers),
+            "deliberatorRetries": sum(result.retries for result in deliberations),
+            "aggregatorRetries": state.get("aggregation_retries", 0),
         },
         results={
             "rawFindings": sum(len(result.findings) for result in reviewers),

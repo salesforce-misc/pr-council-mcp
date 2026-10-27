@@ -185,6 +185,7 @@ class DeliberationResult(BaseModel):
     total_tokens: int = 0
     token_accounting_complete: bool = True
     tool_calls: int = 0
+    retries: int = 0
 
 
 class AggregatedFinding(BaseModel):

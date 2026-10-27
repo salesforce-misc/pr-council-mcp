@@ -190,11 +190,31 @@ class FakeReviewerAgent:
         ), Usage(total_tokens=10)
 
 
+async def _call_model_through(retry, attempts, key, *, failures, error=None):
+    """Send one model call through ``retry`` that fails ``failures`` times first, counting attempts under ``key``.
+
+    Each failure is ``error``, or a rate limit when it is omitted.
+    """
+
+    async def model_call(request):
+        attempts[key] += 1
+        if attempts[key] <= failures:
+            if error is not None:
+                raise error
+            rate_limited = Exception("Error code: 429 - rate limit exceeded")
+            rate_limited.status_code = 429  # type: ignore[attr-defined]
+            raise rate_limited
+
+    await retry.awrap_model_call(None, model_call)
+
+
 class FlakyReviewerAgent(FakeReviewerAgent):
-    """Sends one model call through the retry policy the graph supplies; model-a's call is rate limited first."""
+    """Sends one model call through the graph's retry policy; model-a's call fails ``failures`` times first."""
 
     failures = 0
+    error: Exception | None = None
     calls: Counter[str] = Counter()
+    attempts: Counter[str] = Counter()
 
     def __init__(self, *args, retry, **kwargs):
         super().__init__(*args, **kwargs)
@@ -202,28 +222,9 @@ class FlakyReviewerAgent(FakeReviewerAgent):
 
     async def run_iteration(self, **kwargs):
         type(self).calls[self.model_id] += 1
-        attempts = 0
-
-        async def model_call(request):
-            nonlocal attempts
-            attempts += 1
-            if self.model_id == "model-a" and attempts <= self.failures:
-                error = Exception("Error code: 429 - rate limit exceeded")
-                error.status_code = 429  # type: ignore[attr-defined]
-                raise error
-
-        await self.retry.awrap_model_call(None, model_call)
+        failures = self.failures if self.model_id == "model-a" else 0
+        await _call_model_through(self.retry, self.attempts, self.model_id, failures=failures, error=self.error)
         return await super().run_iteration(**kwargs)
-
-
-class NonRetryableReviewerAgent(FakeReviewerAgent):
-    """Always fails with a deterministic (non-transient) error."""
-
-    calls = 0
-
-    async def run_iteration(self, **kwargs):
-        type(self).calls += 1
-        raise ValueError("invalid model configuration")
 
 
 async def fake_deliberate(model, sandbox_profile, base_sha, head_sha, **values):
@@ -573,10 +574,7 @@ async def test_follow_up_aggregation_uses_synthetic_retained_id(monkeypatch, tmp
     assert any(assessment["status"] == "still_present" for assessment in paused["prior_assessments"])
 
 
-async def _run_flaky_reviewers(monkeypatch, tmp_path, *, failures):
-    FlakyReviewerAgent.failures = failures
-    FlakyReviewerAgent.calls = Counter()
-    _patch_graph_fakes(monkeypatch, reviewer_agent=FlakyReviewerAgent)
+async def _run_with_two_attempts_per_model_call(tmp_path):
     limits = PRReviewLimitsConfig(model_max_attempts=2, rate_limit_base_delay_seconds=0)
     store = FakeStore()
     deps = _make_deps(tmp_path, store, FakeGit())
@@ -592,14 +590,24 @@ async def _run_flaky_reviewers(monkeypatch, tmp_path, *, failures):
     return store
 
 
+async def _run_flaky_reviewers(monkeypatch, tmp_path, *, failures, error=None):
+    FlakyReviewerAgent.failures = failures
+    FlakyReviewerAgent.error = error
+    FlakyReviewerAgent.calls = Counter()
+    FlakyReviewerAgent.attempts = Counter()
+    _patch_graph_fakes(monkeypatch, reviewer_agent=FlakyReviewerAgent)
+    return await _run_with_two_attempts_per_model_call(tmp_path)
+
+
 async def test_a_reviewer_model_call_retries_with_the_configured_policy(monkeypatch, tmp_path):
     store = await _run_flaky_reviewers(monkeypatch, tmp_path, failures=1)
 
     # The rate-limited model call was retried inside the reviewer pass, which ran once and recovered.
     assert store.statuses[-1] == OperationStatus.READY
     assert FlakyReviewerAgent.calls == Counter({"model-a": 1, "model-b": 1, "model-c": 1})
+    assert FlakyReviewerAgent.attempts["model-a"] == 2
     metrics = store.preview["metrics"]["reviewers"]
-    assert (metrics["failed"], metrics["retries"]) == (0, 1)
+    assert (metrics["failed"], metrics["reviewerRetries"], metrics["retries"]) == (0, 1, 1)
     assert store.preview["reviewer_failures"] == []
     assert len(store.preview["comments"]) == 1
 
@@ -609,26 +617,47 @@ async def test_a_reviewer_fails_without_rerunning_its_pass_when_retries_run_out(
 
     # model_max_attempts=2 bounds the model call; the graph does not start the pass again.
     assert FlakyReviewerAgent.calls == Counter({"model-a": 1, "model-b": 1, "model-c": 1})
+    assert FlakyReviewerAgent.attempts["model-a"] == 2
     assert [(item["model"], item["retries"]) for item in store.preview["reviewer_failures"]] == [("model-a", 1)]
     assert store.preview["metrics"]["reviewers"]["retries"] == 1
 
 
-async def test_reviewer_does_not_retry_non_retryable_error(monkeypatch, tmp_path):
-    NonRetryableReviewerAgent.calls = 0
-    _patch_graph_fakes(monkeypatch, reviewer_agent=NonRetryableReviewerAgent)
-    deps = _make_deps(tmp_path, FakeStore(), FakeGit())
+async def test_a_reviewer_model_call_is_not_retried_after_a_non_retryable_error(monkeypatch, tmp_path):
+    store = await _run_flaky_reviewers(
+        monkeypatch, tmp_path, failures=1, error=ValueError("invalid model configuration")
+    )
 
-    async with AsyncSqliteSaver.from_conn_string(os.fspath(tmp_path / "nonretry.sqlite3")) as checkpointer:
-        await checkpointer.setup()
-        graph = build_review_graph(deps, checkpointer)
-        with pytest.raises(ReviewError):
-            await graph.ainvoke(
-                _initial_state("nonretry-operation", {"quality": ["model-a"], "security": ["model-b"]}),
-                config={"configurable": {"thread_id": "nonretry-operation"}, "recursion_limit": 100},
-            )
+    # A second attempt would have succeeded, but a deterministic error fails the reviewer on the first.
+    assert FlakyReviewerAgent.calls == Counter({"model-a": 1, "model-b": 1, "model-c": 1})
+    assert FlakyReviewerAgent.attempts["model-a"] == 1
+    assert [(item["model"], item["retries"]) for item in store.preview["reviewer_failures"]] == [("model-a", 0)]
+    assert store.preview["metrics"]["reviewers"]["retries"] == 0
 
-    # Each of the two reviewers runs exactly once before failing out.
-    assert NonRetryableReviewerAgent.calls == 2
+
+async def test_deliberation_and_aggregation_model_call_retries_are_counted(monkeypatch, tmp_path):
+    attempts: Counter[str] = Counter()
+
+    async def flaky_deliberate(model, sandbox_profile, base_sha, head_sha, **values):
+        await _call_model_through(values["retry"], attempts, values["disposition"], failures=1)
+        return await fake_deliberate(model, sandbox_profile, base_sha, head_sha, **values)
+
+    async def flaky_aggregate(model, **values):
+        await _call_model_through(values["retry"], attempts, "aggregation", failures=1)
+        return await fake_aggregate(model, **values)
+
+    _patch_graph_fakes(monkeypatch)
+    monkeypatch.setattr(graph_module, "deliberate", flaky_deliberate)
+    monkeypatch.setattr(graph_module, "aggregate", flaky_aggregate)
+    store = await _run_with_two_attempts_per_model_call(tmp_path)
+
+    assert attempts == Counter({"quality": 2, "security": 2, "aggregation": 2})
+    metrics = store.preview["metrics"]["reviewers"]
+    assert {key: metrics[key] for key in ("reviewerRetries", "deliberatorRetries", "aggregatorRetries")} == {
+        "reviewerRetries": 0,
+        "deliberatorRetries": 2,
+        "aggregatorRetries": 1,
+    }
+    assert metrics["retries"] == 3
 
 
 def _make_deps(tmp_path, store, git):
