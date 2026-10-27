@@ -6,10 +6,11 @@ import hashlib
 import json
 from typing import Any
 
-from langchain.agents import create_agent
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
+from localmcp.agents import create_agent
+from localmcp.retry import ModelCallRetryMiddleware
 from localmcp.sandbox import SandboxProfile
 from localmcp.sandbox.seatbelt import sandbox_tools
 from localmcp.structured_output import SubmitResultMiddleware
@@ -66,6 +67,7 @@ class ReviewerAgent:
         tool_budget: ToolBudget,
         *,
         source_tool_timeout_seconds: float,
+        retry: ModelCallRetryMiddleware | None = None,
     ):
         self.disposition = disposition
         self.model_id = model_id
@@ -88,6 +90,7 @@ class ReviewerAgent:
             # drop ProviderStrategy's schema or let a model answer without inspecting the source. An unforced
             # submission tool is the lowest common denominator; its in-run correction rounds are deliberate.
             middleware=[SubmitResultMiddleware(RawIterationCandidate)],
+            retry=retry,
             name=f"pr-review-{disposition}",
         )
 

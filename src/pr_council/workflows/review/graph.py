@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import operator
 import os
@@ -16,19 +15,18 @@ from langgraph.types import Send, interrupt
 from localmcp.llm import ModelFactory
 from localmcp.observability.logging import get_logger
 from localmcp.observability.telemetry import LangfuseTelemetry
-from localmcp.retry import call_with_rate_limit_retry, is_rate_limit_error, is_retryable_error, rate_limit_delay
+from localmcp.retry import ModelCallRetryMiddleware, is_rate_limit_error
 from localmcp.sandbox import INSPECTION_TOOLS, RootAccess, SandboxProfile, SandboxRoot
 
 from pr_council.agents.review.aggregator import aggregate
 from pr_council.agents.review.common import (
     ResponseUsageCallback,
     ToolBudget,
-    Usage,
     extract_callback_usage,
 )
 from pr_council.agents.review.deliberator import deliberate
 from pr_council.agents.review.reviewer import ReviewerAgent
-from pr_council.config import Config
+from pr_council.config import Config, PRReviewLimitsConfig
 from pr_council.review.diff import commentable_lines
 from pr_council.review.git import GitHubCli, LocalSourceSnapshot
 from pr_council.review.locks import RepoLock
@@ -155,6 +153,33 @@ def _review_sandbox_profile(
     )
 
 
+class _ModelCallRetries:
+    """Retry each failed model call within the configured limits, logging and counting every retry."""
+
+    def __init__(self, limits: PRReviewLimitsConfig, event: str, **fields: Any) -> None:
+        self.count = 0
+        self._event = event
+        self._fields = fields
+        self.middleware = ModelCallRetryMiddleware(
+            max_attempts=limits.model_max_attempts,
+            base_delay=limits.rate_limit_base_delay_seconds,
+            max_delay=limits.rate_limit_max_delay_seconds,
+            on_retry=self._on_retry,
+        )
+
+    def _on_retry(self, attempt: int, delay: float, exc: BaseException) -> None:
+        self.count += 1
+        log.warning(
+            self._event,
+            **self._fields,
+            attempt=attempt,
+            delay_seconds=round(delay, 2),
+            rate_limited=is_rate_limit_error(exc),
+            error_type=type(exc).__name__,
+            status_code=getattr(exc, "status_code", None),
+        )
+
+
 def _require_same_local_snapshot(state: GraphState, snapshot: LocalSourceSnapshot) -> None:
     """Reject local authority changes that ordinary Git cleanliness cannot see."""
     expected_metadata = Path(state["git_metadata_root"])
@@ -191,152 +216,116 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         await deps.check_cancelled(operation_id)
         job = state["job"]
         iteration = state.get("iteration", 0) + 1
-        last_error: Exception | None = None
         usage_callback = ResponseUsageCallback()
         limits = deps.config.pr_review.limits
-        max_attempts = limits.model_max_attempts
-        # Intentionally span retries: failed attempts still consume billable tokens,
-        # and operation metrics report total usage rather than only the successful call.
-        attempts_made = 0
-        failed_tool_calls = 0
-        for attempt in range(max_attempts):
-            attempts_made += 1
-            # Fresh budget per attempt: ToolBudget.claim() only increments, so reusing
-            # one instance would leave a retry pre-charged and prematurely exhausted.
-            tool_budget = ToolBudget(limits.reviewer_tool_calls_per_iteration)
-            try:
-                with deps.telemetry.span(
-                    "pr_review.reviewer",
-                    observation_type="span",
-                    metadata={
-                        "role": "reviewer",
-                        "disposition": job["disposition"],
-                        "iteration": iteration,
-                        "attempt": attempt + 1,
-                    },
-                ) as observation:
-                    model_owner = deps.model_factory.create(
-                        model_id=job["model"],
-                        reasoning_effort=state.get("reasoning_effort"),
+        tool_budget = ToolBudget(limits.reviewer_tool_calls_per_iteration)
+        retries = _ModelCallRetries(
+            limits,
+            "review.reviewer_retry",
+            operation_id=operation_id,
+            disposition=job["disposition"],
+            model=job["model"],
+            iteration=iteration,
+        )
+        try:
+            with deps.telemetry.span(
+                "pr_review.reviewer",
+                observation_type="span",
+                metadata={"role": "reviewer", "disposition": job["disposition"], "iteration": iteration},
+            ) as observation:
+                model_owner = deps.model_factory.create(
+                    model_id=job["model"],
+                    reasoning_effort=state.get("reasoning_effort"),
+                )
+                async with model_owner as model:
+                    agent = ReviewerAgent(
+                        model,
+                        _review_sandbox_profile(
+                            state["worktree_path"],
+                            state["git_metadata_root"],
+                            state.get("source_excluded_paths"),
+                        ),
+                        state["base_sha"],
+                        state["head_sha"],
+                        job["disposition"],
+                        job["model"],
+                        tool_budget,
+                        source_tool_timeout_seconds=state["source_tool_timeout_seconds"],
+                        retry=retries.middleware,
                     )
-                    async with model_owner as model:
-                        agent = ReviewerAgent(
-                            model,
-                            _review_sandbox_profile(
-                                state["worktree_path"],
-                                state["git_metadata_root"],
-                                state.get("source_excluded_paths"),
-                            ),
-                            state["base_sha"],
-                            state["head_sha"],
-                            job["disposition"],
-                            job["model"],
-                            tool_budget,
-                            source_tool_timeout_seconds=state["source_tool_timeout_seconds"],
-                        )
-                        candidate, usage = await agent.run_iteration(
-                            iteration=iteration,
-                            total_iterations=state["iterations"],
-                            context=state["context"],
-                            prior_findings=state.get("prior_findings", []),
-                            previous=state.get("candidate"),
-                            context_changes=state.get("context_changes", []),
-                            usage_callback=usage_callback,
-                            langfuse_callback=deps.telemetry.langchain_callback(),
-                        )
-                    # Fold in tool calls made by earlier transiently-failed attempts so
-                    # node telemetry reports the review's total source-tool use.
-                    total_tool_calls = usage.tool_calls + failed_tool_calls
-                    observation.update(
-                        usage_details={
-                            "input": usage.input_tokens,
-                            "output": usage.output_tokens,
-                            "total": usage.total_tokens,
-                        },
-                        metadata={
-                            "tool_calls": total_tool_calls,
-                            "token_accounting_complete": usage.complete,
-                            "finding_count": len(candidate.findings),
-                        },
-                    )
-                allowed_prior_ids = {str(finding["id"]) for finding in state.get("prior_findings", [])}
-                normalized_assessments = normalize_prior_assessments(candidate.prior_assessments, allowed_prior_ids)
-                if len(normalized_assessments) != len(candidate.prior_assessments):
-                    log.info(
-                        "review.prior_assessments_normalized",
-                        operation_id=operation_id,
-                        disposition=job["disposition"],
-                        model=job["model"],
-                        supplied=len(candidate.prior_assessments),
-                        retained=len(normalized_assessments),
-                    )
-                candidate = candidate.model_copy(update={"prior_assessments": normalized_assessments})
-                return {
-                    "iteration": iteration,
-                    "candidate": candidate.model_dump(mode="json"),
-                    "input_tokens": state.get("input_tokens", 0) + usage.input_tokens,
-                    "output_tokens": state.get("output_tokens", 0) + usage.output_tokens,
-                    "total_tokens": state.get("total_tokens", 0) + usage.total_tokens,
-                    "token_accounting_complete": state.get("token_accounting_complete", True) and usage.complete,
-                    "tool_calls": state.get("tool_calls", 0) + total_tool_calls,
-                    "retries": state.get("retries", 0) + attempt,
-                }
-            except Exception as exc:
-                last_error = exc
-                failed_tool_calls += tool_budget.used
-                # Deterministic failures (validation, unknown-model config, exhausted
-                # tool budget) are not transient: retrying only re-runs the reviewer's
-                # multi-turn loop and burns tokens. Match call_with_rate_limit_retry and
-                # stop immediately, falling through to the failed-result return below.
-                if not is_retryable_error(exc):
-                    break
-                if attempt + 1 < max_attempts:
-                    delay = rate_limit_delay(
-                        exc,
-                        attempt + 1,
-                        base_delay=limits.rate_limit_base_delay_seconds,
-                        max_delay=limits.rate_limit_max_delay_seconds,
-                    )
-                    log.warning(
-                        "review.reviewer_retry",
-                        operation_id=operation_id,
-                        disposition=job["disposition"],
-                        model=job["model"],
+                    candidate, usage = await agent.run_iteration(
                         iteration=iteration,
-                        attempt=attempt + 1,
-                        delay_seconds=round(delay, 2),
-                        rate_limited=is_rate_limit_error(exc),
-                        error_type=type(exc).__name__,
-                        status_code=getattr(exc, "status_code", None),
+                        total_iterations=state["iterations"],
+                        context=state["context"],
+                        prior_findings=state.get("prior_findings", []),
+                        previous=state.get("candidate"),
+                        context_changes=state.get("context_changes", []),
+                        usage_callback=usage_callback,
+                        langfuse_callback=deps.telemetry.langchain_callback(),
                     )
-                    await asyncio.sleep(delay)
-        assert last_error is not None
-        failed_usage = extract_callback_usage(usage_callback, tool_calls=failed_tool_calls)
-        retries = max(0, attempts_made - 1)
-        return {
-            "iteration": state["iterations"],
-            "candidate": {"findings": [], "prior_assessments": [], "notes": []},
-            "retries": state.get("retries", 0) + retries,
-            "input_tokens": state.get("input_tokens", 0) + failed_usage.input_tokens,
-            "output_tokens": state.get("output_tokens", 0) + failed_usage.output_tokens,
-            "total_tokens": state.get("total_tokens", 0) + failed_usage.total_tokens,
-            "tool_calls": state.get("tool_calls", 0) + failed_usage.tool_calls,
-            "token_accounting_complete": False,
-            "reviewer_results": [
-                ReviewerResult(
+                observation.update(
+                    usage_details={
+                        "input": usage.input_tokens,
+                        "output": usage.output_tokens,
+                        "total": usage.total_tokens,
+                    },
+                    metadata={
+                        "tool_calls": usage.tool_calls,
+                        "token_accounting_complete": usage.complete,
+                        "finding_count": len(candidate.findings),
+                    },
+                )
+            allowed_prior_ids = {str(finding["id"]) for finding in state.get("prior_findings", [])}
+            normalized_assessments = normalize_prior_assessments(candidate.prior_assessments, allowed_prior_ids)
+            if len(normalized_assessments) != len(candidate.prior_assessments):
+                log.info(
+                    "review.prior_assessments_normalized",
+                    operation_id=operation_id,
                     disposition=job["disposition"],
                     model=job["model"],
-                    failed=True,
-                    error=str(last_error),
-                    retries=state.get("retries", 0) + retries,
-                    input_tokens=state.get("input_tokens", 0) + failed_usage.input_tokens,
-                    output_tokens=state.get("output_tokens", 0) + failed_usage.output_tokens,
-                    total_tokens=state.get("total_tokens", 0) + failed_usage.total_tokens,
-                    tool_calls=state.get("tool_calls", 0) + failed_usage.tool_calls,
-                    token_accounting_complete=False,
-                ).model_dump(mode="json")
-            ],
-        }
+                    supplied=len(candidate.prior_assessments),
+                    retained=len(normalized_assessments),
+                )
+            candidate = candidate.model_copy(update={"prior_assessments": normalized_assessments})
+            return {
+                "iteration": iteration,
+                "candidate": candidate.model_dump(mode="json"),
+                "input_tokens": state.get("input_tokens", 0) + usage.input_tokens,
+                "output_tokens": state.get("output_tokens", 0) + usage.output_tokens,
+                "total_tokens": state.get("total_tokens", 0) + usage.total_tokens,
+                "token_accounting_complete": state.get("token_accounting_complete", True) and usage.complete,
+                "tool_calls": state.get("tool_calls", 0) + usage.tool_calls,
+                "retries": state.get("retries", 0) + retries.count,
+            }
+        except Exception as exc:
+            # The agent already retried each failed model call, so what remains fails the job: rerunning the pass
+            # would repeat its completed turns and source-tool calls.
+            failed_usage = extract_callback_usage(usage_callback, tool_calls=tool_budget.used)
+            total_retries = state.get("retries", 0) + retries.count
+            return {
+                "iteration": state["iterations"],
+                "candidate": {"findings": [], "prior_assessments": [], "notes": []},
+                "retries": total_retries,
+                "input_tokens": state.get("input_tokens", 0) + failed_usage.input_tokens,
+                "output_tokens": state.get("output_tokens", 0) + failed_usage.output_tokens,
+                "total_tokens": state.get("total_tokens", 0) + failed_usage.total_tokens,
+                "tool_calls": state.get("tool_calls", 0) + failed_usage.tool_calls,
+                "token_accounting_complete": False,
+                "reviewer_results": [
+                    ReviewerResult(
+                        disposition=job["disposition"],
+                        model=job["model"],
+                        failed=True,
+                        error=str(exc),
+                        retries=total_retries,
+                        input_tokens=state.get("input_tokens", 0) + failed_usage.input_tokens,
+                        output_tokens=state.get("output_tokens", 0) + failed_usage.output_tokens,
+                        total_tokens=state.get("total_tokens", 0) + failed_usage.total_tokens,
+                        tool_calls=state.get("tool_calls", 0) + failed_usage.tool_calls,
+                        token_accounting_complete=False,
+                    ).model_dump(mode="json")
+                ],
+            }
 
     def continue_iterations(state: ReviewerState) -> str:
         if state.get("reviewer_results"):
@@ -626,21 +615,24 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         ]
         model_id = state["request"]["deliberation_model"]
         limits = deps.config.pr_review.limits
-        # Shared across outer retries so token spend and source-tool calls from an attempt that re-raises a
-        # transient error are still reported.
-        deliberation_usage = Usage()
-
-        async def run_deliberation() -> Any:
-            # Allocate a fresh budget per attempt: ToolBudget.claim() only ever
-            # increments, so reusing one instance across call_with_rate_limit_retry
-            # attempts would leave a retry pre-charged and prematurely exhausted.
-            tool_budget = ToolBudget(limits.deliberator_tool_calls_per_disposition)
+        retries = _ModelCallRetries(
+            limits,
+            "review.deliberator_retry",
+            operation_id=state["operation_id"],
+            disposition=disposition,
+            model=model_id,
+        )
+        with deps.telemetry.span(
+            "pr_review.deliberator",
+            observation_type="span",
+            metadata={"role": "deliberator", "disposition": disposition},
+        ) as observation:
             model_owner = deps.model_factory.create(
                 model_id=model_id,
                 reasoning_effort=state["request"].get("deliberation_effort"),
             )
             async with model_owner as model:
-                return await deliberate(
+                candidate, usage = await deliberate(
                     model,
                     _review_sandbox_profile(
                         state["worktree_path"],
@@ -654,12 +646,11 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                     assessments=assessments,
                     prior_findings=prior_findings,
                     context=state["context"],
-                    tool_budget=tool_budget,
+                    tool_budget=ToolBudget(limits.deliberator_tool_calls_per_disposition),
                     source_tool_timeout_seconds=state["request"].get(
                         "source_tool_timeout_seconds",
                         deps.config.pr_review.limits.source_tool_timeout_seconds,
                     ),
-                    usage=deliberation_usage,
                     langfuse_callback=deps.telemetry.langchain_callback(),
                     on_incomplete=lambda exc: log.warning(
                         "review.deliberation_incomplete",
@@ -668,30 +659,8 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                         model=model_id,
                         error_type=type(exc).__name__,
                     ),
+                    retry=retries.middleware,
                 )
-
-        with deps.telemetry.span(
-            "pr_review.deliberator",
-            observation_type="span",
-            metadata={"role": "deliberator", "disposition": disposition},
-        ) as observation:
-            candidate, usage = await call_with_rate_limit_retry(
-                run_deliberation,
-                max_attempts=limits.model_max_attempts,
-                base_delay=limits.rate_limit_base_delay_seconds,
-                max_delay=limits.rate_limit_max_delay_seconds,
-                on_retry=lambda attempt, delay, exc: log.warning(
-                    "review.deliberator_retry",
-                    operation_id=state["operation_id"],
-                    disposition=disposition,
-                    model=model_id,
-                    attempt=attempt,
-                    delay_seconds=round(delay, 2),
-                    rate_limited=is_rate_limit_error(exc),
-                    error_type=type(exc).__name__,
-                    status_code=getattr(exc, "status_code", None),
-                ),
-            )
             observation.update(
                 usage_details={
                     "input": usage.input_tokens,
@@ -835,10 +804,9 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             )
         retained.extend(remaining_prior)
         model_id = state["request"]["aggregation_model"]
-        limits = deps.config.pr_review.limits
-        # Shared across outer retries so token spend from an attempt that re-raises
-        # a transient error is preserved rather than discarded with the exception.
-        aggregation_usage = Usage()
+        retries = _ModelCallRetries(
+            deps.config.pr_review.limits, "review.aggregator_retry", operation_id=state["operation_id"], model=model_id
+        )
         incomplete = False
 
         def on_incomplete(exc: Exception) -> None:
@@ -852,45 +820,27 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
                 error_type=type(exc).__name__,
             )
 
-        async def run_aggregation() -> Any:
+        with deps.telemetry.span(
+            "pr_review.aggregator",
+            observation_type="span",
+            metadata={"role": "aggregator", "retained_finding_count": len(retained)},
+        ) as observation:
             model_owner = deps.model_factory.create(
                 model_id=model_id,
                 reasoning_effort=state["request"].get("aggregation_effort"),
             )
             async with model_owner as model:
-                return await aggregate(
+                candidate, usage = await aggregate(
                     model,
                     findings=retained,
                     prior_assessments=assessments,
                     baseline_findings=state.get("baseline_findings", []),
                     context_changes=state.get("context_changes", []),
                     context=state["context"],
-                    usage=aggregation_usage,
                     langfuse_callback=deps.telemetry.langchain_callback(),
                     on_incomplete=on_incomplete,
+                    retry=retries.middleware,
                 )
-
-        with deps.telemetry.span(
-            "pr_review.aggregator",
-            observation_type="span",
-            metadata={"role": "aggregator", "retained_finding_count": len(retained)},
-        ) as observation:
-            candidate, usage = await call_with_rate_limit_retry(
-                run_aggregation,
-                max_attempts=limits.model_max_attempts,
-                base_delay=limits.rate_limit_base_delay_seconds,
-                max_delay=limits.rate_limit_max_delay_seconds,
-                on_retry=lambda attempt, delay, exc: log.warning(
-                    "review.aggregator_retry",
-                    operation_id=state["operation_id"],
-                    model=model_id,
-                    attempt=attempt,
-                    delay_seconds=round(delay, 2),
-                    rate_limited=is_rate_limit_error(exc),
-                    error_type=type(exc).__name__,
-                    status_code=getattr(exc, "status_code", None),
-                ),
-            )
             observation.update(
                 usage_details={
                     "input": usage.input_tokens,

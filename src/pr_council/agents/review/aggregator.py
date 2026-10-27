@@ -7,6 +7,7 @@ from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import ToolException
+from localmcp.retry import ModelCallRetryMiddleware
 from pydantic import BaseModel, Field
 
 from pr_council.agents.review.common import BASE_SAFETY, Usage
@@ -121,15 +122,11 @@ async def aggregate(
     baseline_findings: list[dict[str, object]],
     context_changes: list[dict[str, object]],
     context: list[dict[str, object]],
-    usage: Usage | None = None,
     langfuse_callback: Any | None = None,
     on_incomplete: Callable[[Exception], None] | None = None,
+    retry: ModelCallRetryMiddleware | None = None,
 ) -> tuple[AggregationCandidate, Usage]:
-    # Accumulate into a caller-supplied Usage when given so token spend from an
-    # invocation that later re-raises a transient error (retried by the caller's
-    # call_with_rate_limit_retry) is preserved across outer attempts rather than
-    # discarded with the raised exception.
-    usage = usage if usage is not None else Usage()
+    usage = Usage()
     recorder = _MergeRecorder(findings)
     if len(findings) < 2:
         return recorder.candidate(), usage
@@ -148,8 +145,9 @@ async def aggregate(
         },
         usage=usage,
         langfuse_callback=langfuse_callback,
-        # Every finding is publishable without merging, so a deterministic failure keeps the merges already
+        # Every finding is publishable without merging, so a failure keeps the merges already
         # recorded instead of failing the review.
         on_incomplete=on_incomplete,
+        retry=retry,
     )
     return recorder.candidate(), usage

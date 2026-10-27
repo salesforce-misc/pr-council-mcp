@@ -13,7 +13,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from typing import Any, ClassVar
 
-from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, AgentState, ToolCallRequest, hook_config
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
@@ -22,7 +21,8 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from langgraph.runtime import Runtime
 from langgraph.types import Command
-from localmcp.retry import is_retryable_error
+from localmcp.agents import create_agent
+from localmcp.retry import ModelCallRetryMiddleware
 from pydantic import BaseModel
 
 from pr_council.agents.review.common import (
@@ -193,14 +193,15 @@ async def run_recording_agent(
     tool_budget: ToolBudget | None = None,
     langfuse_callback: Any | None = None,
     on_incomplete: Callable[[Exception], None] | None = None,
+    retry: ModelCallRetryMiddleware | None = None,
 ) -> None:
     """Run a recording agent until the model stops, keeping whatever ``recorder`` recorded.
 
-    Transient transport and API faults (429, 5xx, connection, timeout) propagate to the caller's
-    call_with_rate_limit_retry for reset-aware backoff. Any other failure ends the run with what was already recorded
-    and goes to ``on_incomplete``. A failure before anything was recorded, such as a rejected credential or model, has
-    nothing to keep and propagates as well. Token usage and ``tool_budget`` calls accumulate into ``usage`` either way,
-    so spend from an attempt that re-raises is still reported when the caller retries with the same accumulator.
+    ``retry`` repeats a model call that fails with a transient fault (429, 5xx, connection, timeout) without
+    restarting the run, so recorded items and source-tool calls are never repeated. A failure that remains ends the run
+    with what was already recorded and goes to ``on_incomplete``. A failure before anything was recorded, such as a
+    rejected credential or model, has nothing to keep and propagates. Token usage and ``tool_budget`` calls accumulate
+    into ``usage`` either way.
     """
     # Unforced tools, as for the reviewers: forced tool_choice is not supported by every model and gateway.
     agent = create_agent(
@@ -208,6 +209,7 @@ async def run_recording_agent(
         [*tools, *recorder.tools],
         system_prompt=system_prompt,
         middleware=[RecordingMiddleware(recorder)],
+        retry=retry,
         name=name,
     )
     usage_callback = ResponseUsageCallback()
@@ -223,7 +225,7 @@ async def run_recording_agent(
     try:
         await agent.ainvoke({"messages": [HumanMessage(content=json.dumps(payload))]}, config=config)
     except Exception as exc:
-        if is_retryable_error(exc) or not recorder.has_records():
+        if not recorder.has_records():
             raise
         if on_incomplete is not None:
             on_incomplete(exc)

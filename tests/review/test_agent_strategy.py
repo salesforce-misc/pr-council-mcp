@@ -1,6 +1,7 @@
 from typing import Any, cast
 
 from langchain_core.language_models.chat_models import BaseChatModel
+from localmcp.retry import ModelCallRetryMiddleware
 from localmcp.sandbox import RootAccess, SandboxProfile, SandboxRoot
 from localmcp.structured_output import SubmitResultMiddleware
 
@@ -18,6 +19,7 @@ def test_reviewer_uses_unforced_submit_tool(monkeypatch, tmp_path):
 
     monkeypatch.setattr(reviewer_module, "create_agent", fake_create_agent)
     monkeypatch.setattr(reviewer_module, "sandbox_tools", lambda *a, **k: [])
+    retry = ModelCallRetryMiddleware()
     ReviewerAgent(
         cast(BaseChatModel, object()),
         SandboxProfile((SandboxRoot(tmp_path, RootAccess.READ_ONLY),)),
@@ -27,7 +29,9 @@ def test_reviewer_uses_unforced_submit_tool(monkeypatch, tmp_path):
         "model",
         ToolBudget(1),
         source_tool_timeout_seconds=30.0,
+        retry=retry,
     )
 
     assert captured.get("response_format") is None
+    assert captured["retry"] is retry
     assert any(isinstance(m, SubmitResultMiddleware) for m in captured["middleware"])
