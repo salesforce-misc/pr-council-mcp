@@ -45,9 +45,10 @@ The current modules are organized as follows:
   - `store.py` owns the durable operation catalog beside LangGraph's checkpoint database.
 - **`pr_council/agents/review/`** — the reviewer, closed-set deliberator, and aggregator. Role-specific prompt text
   is colocated with its owning agent module. `common.py` owns the shared safety prompt builder, tool budgets, and usage
-  accounting; `recording.py` owns the incremental-recording agent loop shared by the deliberator and aggregator;
-  model-call retry and rate-limit backoff come from `localmcp.retry`. Repository content, diffs, tool output, prior
-  findings, and caller context are always untrusted data.
+  accounting; `recording.py` owns the incremental-recording agent loop shared by the deliberator and aggregator.
+  Every agent is built with `localmcp.agents.create_agent`, whose `localmcp.retry.ModelCallRetryMiddleware` retries
+  each failed model call with rate-limit backoff, so a transient fault never restarts an agent run or repeats its
+  tool calls. Repository content, diffs, tool output, prior findings, and caller context are always untrusted data.
 - **`localmcp.workflows.runtime.WorkflowRuntime`** owns state-directory permissions, store/checkpointer lifecycle,
   operation leases and heartbeats, background-task tracking, and recovery scheduling. Domain subclasses own graph
   construction, cancellation mapping, and domain-resource cleanup.
@@ -193,10 +194,12 @@ The deliberator and aggregator are recording agents: each decision, prior-findin
 tool call, validated as it arrives against a closed ID set, so no single response carries the whole result and a
 rejected call records nothing. When a response reaches the output limit, its final call is rejected for the model to
 record again; a response cut off before any call, or a deliberator reply that stops with IDs unrecorded, is answered
-with what remains, a bounded number of times. A deterministic failure keeps what was already recorded; a failure
-before anything is recorded, such as a rejected credential or model, fails the operation instead. The graph then
-closes deliberation over the supplied IDs: an undecided finding is kept as written and an unassessed prior finding
-becomes `cannot_verify`, both logged. The summary warns when findings went undeliberated or aggregation ended early.
+with what remains, a bounded number of times. A failure that outlasts its model-call retries keeps what was already
+recorded; a failure before anything is recorded, such as a rejected credential or model, fails the operation instead.
+The graph then closes deliberation over the supplied IDs: an undecided finding is kept as written and an unassessed
+prior finding becomes `cannot_verify`, both logged. The summary warns when findings went undeliberated or aggregation
+ended early. A reviewer pass that fails after its model-call retries fails that reviewer job rather than running
+again, and the summary reports the degraded coverage.
 
 The top-level summary is rendered in code from counts of the published findings and follow-up assessments; no model
 writes it. `[pr_review].min_severity` (default `info`), or the start tool's per-operation override, sets the lowest
@@ -258,9 +261,9 @@ per-model resolution is persisted with the model selection. The provider remains
 supports.
 
 `[pr_review.limits]` bounds per-pass Bash calls, matrix size, model concurrency, prepared repository size, command
-timeout, model retries, and retry delays. Every Bash result reports the remaining budget. Model output is deliberately
-uncapped: localmcplib requests each model's maximum, because a response truncated mid-reasoning must be repeated
-anyway.
+timeout, attempts per model call, and retry delays. Every Bash result reports the remaining budget. Model output is
+deliberately uncapped: localmcplib requests each model's maximum, because a response truncated mid-reasoning must be
+repeated anyway.
 
 Langfuse is optional and environment-configured. It requires `LOCALMCP_LANGFUSE_ENABLED=true`,
 `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_SECRET_KEY`; the client is always installed. Langfuse

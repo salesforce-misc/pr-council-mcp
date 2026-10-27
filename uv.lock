@@ -1384,7 +1384,7 @@ wheels = [
 
 [[package]]
 name = "localmcplib"
-version = "0.4.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite" },
@@ -1400,9 +1400,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4c/43/319760b5df0f9ef04e61b14bb45c899db2263e654912620a3636390e0a80/localmcplib-0.4.0.tar.gz", hash = "sha256:adc3b620ee56d572d288b59e448a7fa65ae42fd034bc73b7eb950e1c3dd127d4", size = 61523, upload-time = "2026-10-26T22:49:50.27Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5f/ad/73b7f8dee5bf44617085dba305b96901ca2ed576b60e49a55426c4531cd1/localmcplib-0.5.0.tar.gz", hash = "sha256:0396dc4b757a0dea917e10c6e9912c3d7cf1694059262cb18d1d6fc4e381827d", size = 62953, upload-time = "2026-10-27T03:35:31.406Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1c/6d/e2036449b5f8a56cdd5ddbb1401c6fa389f34742dfcd12247b2e90873862/localmcplib-0.4.0-py3-none-any.whl", hash = "sha256:9c826afe28fdf23a4994a31ac27d40f302bb061607b0a6178bc31968331d8004", size = 62242, upload-time = "2026-10-26T22:49:48.914Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/f0/b6879c7ee57295e75e6ca2d472272f6a34e13b2f4820a76e4740928f8a6c/localmcplib-0.5.0-py3-none-any.whl", hash = "sha256:1b03ec66b166c18c83f83fcac66d29a0d193e772f7509f3a9156e1f614b2336f", size = 63832, upload-time = "2026-10-27T03:35:30.105Z" },
 ]
 
 [[package]]
@@ -1784,7 +1784,7 @@ wheels = [
 
 [[package]]
 name = "pr-council-mcp"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
@@ -1808,7 +1808,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=4.0.5" },
     { name = "langchain", specifier = ">=1.4.2,<2" },
     { name = "langchain-core", specifier = ">=1.6.4" },
-    { name = "localmcplib", specifier = "==0.4.0" },
+    { name = "localmcplib", specifier = "==0.5.0" },
     { name = "pydantic", specifier = ">=2.13.5" },
 ]
 

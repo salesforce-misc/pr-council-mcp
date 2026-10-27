@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage
+from localmcp.retry import ModelCallRetryMiddleware
 
 from pr_council.agents.review.aggregator import aggregate
 from pr_council.agents.review.common import Usage
@@ -42,6 +43,10 @@ def _rate_limited() -> RuntimeError:
     error = RuntimeError("Error code: 429 - rate limit exceeded")
     error.status_code = 429  # type: ignore[attr-defined]
     return error
+
+
+def _retry(max_attempts: int = 2) -> ModelCallRetryMiddleware:
+    return ModelCallRetryMiddleware(max_attempts=max_attempts, base_delay=0, max_delay=0)
 
 
 def _reported(message: AIMessage) -> AIMessage:
@@ -298,37 +303,44 @@ async def test_fewer_than_two_findings_never_call_the_model(scripted_model):
     assert model.requests == []
 
 
-async def test_aggregation_reraises_retryable_error_for_outer_backoff(scripted_model):
-    # A transient 429 must propagate so the caller's call_with_rate_limit_retry applies reset-aware backoff.
-    model = scripted_model(_rate_limited())
+async def test_a_transient_error_retries_only_the_failed_model_call(scripted_model):
+    model = scripted_model(_merge(["a", "b"], line=2), _rate_limited(), _done())
 
-    with pytest.raises(RuntimeError):
-        await _aggregate(model)
+    candidate, _usage = await _aggregate(model, retry=_retry())
 
-    assert len(model.requests) == 1
+    assert [finding.source_finding_ids for finding in candidate.findings] == [["a", "b"]]
+    # The rejected request is repeated as it was, after the merge that preceded it.
+    assert len(model.requests) == 3
+    assert model.requests[1] == model.requests[2]
 
 
-async def test_aggregation_preserves_usage_when_transient_error_reraises(scripted_model):
-    # Tokens burned before a transient re-raise must survive in the caller-supplied
-    # accumulator so the outer retry does not under-report aggregation spend.
-    model = scripted_model(_reported(_merge(["a", "b"], line=2)), _rate_limited())
-    usage = Usage()
+async def test_merges_and_usage_survive_a_transient_error_that_outlasts_its_retries(scripted_model):
+    model = scripted_model(_reported(_merge(["a", "b"], line=2)), _rate_limited(), _rate_limited())
+    incomplete: list[Exception] = []
 
-    with pytest.raises(RuntimeError):
-        await _aggregate(model, usage=usage)
+    candidate, usage = await _aggregate(model, retry=_retry(), on_incomplete=incomplete.append)
 
-    assert len(model.requests) == 2
+    assert [finding.source_finding_ids for finding in candidate.findings] == [["a", "b"]]
+    assert [getattr(exc, "status_code", None) for exc in incomplete] == [429]
+    assert len(model.requests) == 3
     assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (10, 2, 12)
 
 
-async def test_rejected_request_does_not_mark_retried_usage_incomplete(scripted_model):
-    # The caller's rate-limit retry reuses the accumulator; a request rejected before any response must not
-    # leave a later, fully reported attempt marked incomplete.
-    usage = Usage()
-    with pytest.raises(RuntimeError):
-        await _aggregate(scripted_model(_rate_limited()), usage=usage)
+async def test_a_transient_error_before_any_merge_propagates_after_its_retries(scripted_model):
+    model = scripted_model(_rate_limited(), _rate_limited())
+    incomplete: list[Exception] = []
 
-    await _aggregate(scripted_model(_reported(_done())), usage=usage)
+    with pytest.raises(RuntimeError, match="429"):
+        await _aggregate(model, retry=_retry(), on_incomplete=incomplete.append)
+
+    assert len(model.requests) == 2
+    assert incomplete == []
+
+
+async def test_rejected_request_does_not_mark_retried_usage_incomplete(scripted_model):
+    # A request rejected before any response reports no usage, so it must not leave the retried response's
+    # fully reported usage marked incomplete.
+    _candidate, usage = await _aggregate(scripted_model(_rate_limited(), _reported(_done())), retry=_retry())
 
     assert usage.complete is True
     assert usage.total_tokens == 12

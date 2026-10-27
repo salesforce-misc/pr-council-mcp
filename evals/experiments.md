@@ -1,7 +1,8 @@
 # Experiments
 
 A log of review-quality experiments: what changed, what was measured, and what we concluded. Scores are ReviewBench
-findings-stage results from [`reviewbench/`](reviewbench/README.md).
+findings-stage results from [`reviewbench/`](reviewbench/README.md). Releases records each major and minor release's
+25-PR benchmark; the dated sections below it are experiments.
 
 Single-PR scores are noisy. The same code has scored up to 40 GF1 points apart on one PR, so a single-PR difference
 is a lead to confirm on the 25-PR test set, not a result.
@@ -23,6 +24,52 @@ can.
   excluded.
 - **Reviewer tool calls**: `Bash` calls made by all reviewers across every iteration.
 - **Time**: the operation's wall time from preparation through aggregation. Judging is excluded.
+
+## Releases
+
+Every major and minor release is benchmarked on the 25-PR test set with that release's default review settings, newest
+first. Scores pool every judged finding across the 25 PRs; findings, tokens, reviewer tool calls, and time are totals.
+
+| Version | Run                   | GF1  | GP   | GR   | Golden (high / med / low)       | Findings | Tokens in / out | Reviewer tool calls | Time   | Failed / degraded PRs |
+| ------- | --------------------- | ---- | ---- | ---- | ------------------------------- | -------- | --------------- | ------------------- | ------ | --------------------- |
+| 0.6.0   | `benchmark-25-v0.6.0` | 61.8 | 87.8 | 47.7 | 168/352 (20/36, 91/134, 57/182) | 280      | 49.07M / 1.61M  | 2,177               | 2.68 h | 0 / 1                 |
+
+### 0.6.0
+
+Defaults: the mixed matrix (`claude-opus-5-5` and `gpt-6-sol` for both quality and security, `claude-opus-5-5`
+deliberation, `claude-sonnet-5` aggregation), 3 iterations, `medium` reasoning effort for every role, and 12 reviewer
+tool calls per iteration, reviewing one PR at a time.
+
+Code: [`f96269a`][f96269a] with the version set to 0.6.0. Since the previous 25-PR benchmark, `benchmark-25-ee5f5c4` at
+[`ee5f5c4`][ee5f5c4], [#9] added per-role reasoning effort, removed the output cap and the operation-wide tool budget,
+and moved to localmcplib 0.4.0, which streams every response under a response timeout. [#10] moved to localmcplib
+0.5.0, which retries each failed model call instead of rerunning the reviewer pass and lowers the default response
+timeout to 300 s, and reports retries for every role.
+
+Findings:
+
+- GF1 rose from 58.0 to 61.8 against `benchmark-25-ee5f5c4` (GP 86.1 to 87.8, GR 43.8 to 47.7). That run failed two
+  PRs in aggregation, `vanyastaff/nebula#224` and `superhighfives/pika#200`; their baseline scores come from
+  `benchmark-25-rerun-21k`, which reran them at the same code with a 21,000-token output cap instead of 8,000.
+- 0.6.0 found 14 more golden issues, 168 against 154: 13 more medium, one more low, and the same 20 of 36 high.
+- 11 PRs scored higher, 6 lower, and 8 the same; most differences are within single-PR noise. The largest gain,
+  `PaulStSmith/figlet-comment-generator#32` (28.6 to 77.8, 5 more golden issues), is partly because the baseline lost
+  its `gpt-6-sol` security reviewer to a provider error. Without that PR, GF1 rose from 58.9 to 61.3 and coverage by 9
+  golden issues, 8 of them medium.
+- The largest drop, `simnaut/emdash#2` (25.0 to 0.0), matched none of its 6 golden issues, although the judge
+  classified 15 of its 16 findings as real issues outside the golden set.
+- Outside the golden set, the judge classified 123 findings as real issues, against 126.
+- No PR failed, against two. One was degraded, as in the baseline: in `renedierking/LANdalf#88`, a `gpt-6-sol` quality
+  reviewer's request exceeded the model's context window after 22 tool calls, which is not retried. The PR still scored
+  the baseline's 66.7.
+- Four model calls were retried, and all recovered without rerunning a reviewer pass: two rate-limited
+  `claude-opus-5-5` reviewer calls, and two responses that exceeded the response timeout, one from an aggregator and
+  one from a `claude-opus-5-5` reviewer.
+- Cost was unchanged: 49.07M input tokens against 49.06M, 1.61M output against 1.68M, 2,177 reviewer tool calls against
+  2,165, and 2.68 h against 2.79 h.
+
+Conclusion: 0.6.0 scores 61.8 GF1, 3.8 points above the previous 25-PR benchmark at the same cost, with no failed PRs.
+It is the baseline for the next release.
 
 ## 2026-10-25
 
@@ -191,5 +238,7 @@ which should cost about as much as 3 at 30, would test whether those tokens buy 
 [#8]: https://github.com/salesforce-misc/pr-council-mcp/pull/8
 [#9]: https://github.com/salesforce-misc/pr-council-mcp/pull/9
 [bd9c380]: https://github.com/salesforce-misc/pr-council-mcp/commit/bd9c38090c25b4a762c5713591eaa0108e3a0d1c
+[#10]: https://github.com/salesforce-misc/pr-council-mcp/pull/10
 [ee5f5c4]: https://github.com/salesforce-misc/pr-council-mcp/commit/ee5f5c489b5727bc1be9fe5fe99445211dfda56a
+[f96269a]: https://github.com/salesforce-misc/pr-council-mcp/commit/f96269acd681d75f0393c8efcd426316646c4f2b
 [localmcplib-6]: https://github.com/salesforce-misc/localmcplib/pull/6

@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
+from localmcp.retry import ModelCallRetryMiddleware
 from localmcp.sandbox import RootAccess, SandboxProfile, SandboxRoot
 
 import pr_council.agents.review.deliberator as deliberator_module
@@ -65,6 +66,10 @@ def _rate_limited() -> RuntimeError:
     error = RuntimeError("Error code: 429 - rate limit exceeded")
     error.status_code = 429  # type: ignore[attr-defined]
     return error
+
+
+def _retry(max_attempts: int = 2) -> ModelCallRetryMiddleware:
+    return ModelCallRetryMiddleware(max_attempts=max_attempts, base_delay=0, max_delay=0)
 
 
 _REVISION = {"title": "Narrower claim", "body": "Only empty input is affected.", "severity": "medium"}
@@ -227,16 +232,26 @@ async def test_a_failure_before_anything_is_recorded_propagates(scripted_model, 
     assert incomplete == []
 
 
-async def test_source_tool_calls_and_usage_survive_a_retryable_error(scripted_model, tmp_path):
+async def test_a_transient_error_retries_the_model_call_without_repeating_source_tool_calls(scripted_model, tmp_path):
     first = _turn(_call("Bash", "bash-1", command="git status"), _decide("a"))
     first.usage_metadata = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
     first.response_metadata = {"model_name": "fake"}
-    usage = Usage()
+    model = scripted_model(first, _rate_limited(), _turn(_decide("b")), _done())
 
-    with pytest.raises(RuntimeError):
-        await _deliberate(scripted_model(first, _rate_limited()), root=tmp_path, usage=usage)
+    candidate, usage = await _deliberate(model, root=tmp_path, retry=_retry())
 
+    assert [item.finding_id for item in candidate.finding_decisions] == ["a", "b"]
+    assert len(model.requests) == 4
+    assert model.requests[1] == model.requests[2]
+    # Recording a decision is not a source-tool call, and the retry did not repeat the Bash call.
     assert (usage.total_tokens, usage.tool_calls) == (12, 1)
-    # Recording a decision is not a source-tool call.
-    await _deliberate(scripted_model(_turn(_decide("a"), _decide("b")), _done()), root=tmp_path, usage=usage)
-    assert usage.tool_calls == 1
+
+
+async def test_decisions_survive_a_transient_error_that_outlasts_its_retries(scripted_model, tmp_path):
+    model = scripted_model(_turn(_decide("a")), _rate_limited(), _rate_limited())
+    incomplete: list[Exception] = []
+
+    candidate, _usage = await _deliberate(model, root=tmp_path, retry=_retry(), on_incomplete=incomplete.append)
+
+    assert [item.finding_id for item in candidate.finding_decisions] == ["a"]
+    assert [getattr(exc, "status_code", None) for exc in incomplete] == [429]

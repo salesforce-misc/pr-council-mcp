@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
+from localmcp.retry import ModelCallRetryMiddleware
 from localmcp.sandbox import SandboxProfile
 from localmcp.sandbox.seatbelt import sandbox_tools
 from pydantic import BaseModel, Field
@@ -120,12 +121,11 @@ async def deliberate(
     context: list[dict[str, object]],
     tool_budget: ToolBudget,
     source_tool_timeout_seconds: float,
-    usage: Usage | None = None,
     langfuse_callback: Any | None = None,
     on_incomplete: Callable[[Exception], None] | None = None,
+    retry: ModelCallRetryMiddleware | None = None,
 ) -> tuple[DeliberationCandidate, Usage]:
-    # As for aggregation, a caller-supplied accumulator keeps spend from an attempt that re-raises a transient error.
-    usage = usage if usage is not None else Usage()
+    usage = Usage()
     recorder = _DeliberationRecorder(findings, prior_findings)
     await run_recording_agent(
         model,
@@ -154,8 +154,9 @@ async def deliberate(
         tools=sandbox_tools(sandbox_profile, budget=tool_budget, timeout_seconds=source_tool_timeout_seconds),
         tool_budget=tool_budget,
         langfuse_callback=langfuse_callback,
-        # Undecided findings are kept and missing assessments become cannot_verify, so a deterministic failure keeps
+        # Undecided findings are kept and missing assessments become cannot_verify, so a failure keeps
         # what was already recorded instead of failing the review.
         on_incomplete=on_incomplete,
+        retry=retry,
     )
     return recorder.candidate(), usage
