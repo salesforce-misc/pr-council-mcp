@@ -7,8 +7,7 @@ from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from localmcp.retry import ModelCallRetryMiddleware
-from localmcp.sandbox import SandboxProfile
-from localmcp.sandbox.seatbelt import sandbox_tools
+from localmcp.sandbox import SandboxProfile, sandbox_tools
 from pydantic import BaseModel, Field
 
 from pr_council.agents.review.common import SEVERITY_RUBRIC, ToolBudget, Usage, review_safety_prompt

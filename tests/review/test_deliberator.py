@@ -14,7 +14,7 @@ from pr_council.agents.review.deliberator import DeliberationCandidate, delibera
 
 @pytest.fixture(autouse=True)
 def _fake_sandbox(monkeypatch):
-    # Stands in for the Seatbelt Bash tool: it claims the budget like the real one, without running anything.
+    # Stands in for the sandboxed Bash tool: it claims the budget like the real one, without running anything.
     def sandbox_tools(profile, *, budget, timeout_seconds):
         async def bash(command: str) -> dict[str, Any]:
             await budget.claim()
