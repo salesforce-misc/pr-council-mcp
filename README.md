@@ -6,7 +6,8 @@
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.12-blue.svg)](https://pypi.org/project/pr-council-mcp/)
 [![License](https://img.shields.io/github/license/salesforce-misc/pr-council-mcp.svg)](https://github.com/salesforce-misc/pr-council-mcp/blob/main/LICENSE.txt)
 
-> **Platform support:** macOS only for now. [Why Linux support is pending](https://demianbrecht.com/posts/pr-council-a-runnable-experiment-in-agentic-engineering/#sandboxing-currently-macos-only).
+> **Platform support:** macOS and Linux. Linux needs a few system packages and kernel features for its sandbox; see
+> the [Quickstart](#quickstart).
 
 [![Illustrative terminal replay of the PR Council review lifecycle](assets/pr-council-replay.gif)](https://demianbrecht.com/posts/pr-council-a-runnable-experiment-in-agentic-engineering/)
 
@@ -44,7 +45,7 @@ AR) also count findings outside it, as the judge classifies them. Scores pool ev
 
 ## Quickstart
 
-The server currently runs on macOS and requires Python 3.12+. Install
+The server runs on macOS and Linux and requires Python 3.12+. Install
 [`uv`](https://docs.astral.sh/uv/getting-started/installation/), `git`, [`rg`](https://github.com/BurntSushi/ripgrep),
 and [`gh`](https://cli.github.com/), then authenticate GitHub:
 
@@ -52,6 +53,17 @@ and [`gh`](https://cli.github.com/), then authenticate GitHub:
 gh auth login
 gh auth status
 ```
+
+On Linux, review agents run in a bubblewrap sandbox that only runs system tools from `/usr/bin`, `/bin`, `/usr/sbin`,
+and `/sbin`, so install `git` from your distribution along with the sandbox's dependencies. On Debian or Ubuntu:
+
+```sh
+sudo apt-get install bubblewrap python3 libseccomp2 libc-bin file git
+```
+
+The host must be an x86-64 or AArch64 glibc system with a merged `/usr`, permit unprivileged user namespaces, and
+enable Landlock ABI 3 or newer. Reviews fail rather than run unsandboxed when it does not. See localmcplib's
+[Linux sandbox support](https://github.com/salesforce-misc/localmcplib/blob/main/docs/linux-sandbox.md) for details.
 
 On first launch, the server creates `~/.config/localmcp/localmcp.toml` (or the path beneath `$XDG_CONFIG_HOME`) with
 this base configuration if the file does not exist. The `llm`, `secrets`, and `observability` tables are owned by
@@ -77,6 +89,16 @@ history:
 security add-generic-password -U -s localmcp -a openai_api_key -w
 security add-generic-password -U -s localmcp -a anthropic_api_key -w
 ```
+
+On Linux, store them in the Secret Service keyring, such as GNOME Keyring or KWallet, with `secret-tool` (the
+`libsecret-tools` package on Debian or Ubuntu), which also prompts for each key:
+
+```sh
+secret-tool store --label="localmcp openai_api_key" service localmcp username openai_api_key
+secret-tool store --label="localmcp anthropic_api_key" service localmcp username anthropic_api_key
+```
+
+On a host without a keyring, set `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` in the MCP client's environment instead.
 
 Only the providers used by your selected models need keys. macOS may ask you to allow the server to read these Keychain
 items. The server starts without keys and reports missing credentials when a review is requested.
@@ -130,9 +152,9 @@ the exact revision-bound preview, and publishes only after explicit approval. Re
 and publication revalidates the PR revision and approved payload before writing.
 
 By default the server prepares an isolated managed worktree. Reviewer and deliberator models receive one bounded Bash
-tool inside a read-only macOS Seatbelt sandbox. They can inspect source and Git history with ordinary local tools, but
-cannot write files, access the network or credentials, or execute repository code. A local-checkout mode is also
-available when cloning a large repository is impractical.
+tool inside a read-only sandbox: Seatbelt on macOS, and bubblewrap with Landlock and seccomp on Linux. They can inspect
+source and Git history with ordinary local tools, but cannot write files, access the network or credentials, or execute
+repository code. A local-checkout mode is also available when cloning a large repository is impractical.
 
 The MCP surface intentionally stays small: start, status, preview, commit, and cancel. Published reviews contain
 inline comments plus a `COMMENT`-only summary; the server never approves or rejects a pull request.

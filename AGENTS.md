@@ -33,8 +33,9 @@ The current modules are organized as follows:
 - **`localmcp.secrets`** and **`localmcp.llm`** own shared secret resolution, model capabilities, transport routing,
   and owned model lifetimes. The application supplies its effective endpoint, logical `llm_api_key`, and role model
   IDs.
-- **`localmcp.sandbox`** owns the generic model-facing Bash tool and macOS Seatbelt enforcement. The review graph
-  constructs its repository-specific root grants and exclusions.
+- **`localmcp.sandbox`** owns the generic model-facing Bash tool and its platform enforcement: Seatbelt on macOS, and
+  bubblewrap with Landlock and seccomp on Linux. Agents import only the portable `localmcp.sandbox` interface. The
+  review graph constructs its repository-specific root grants and exclusions.
 - **`pr_council/review/`** — deterministic PR-review contracts:
   - `git.py` owns bounded `git`/`gh` execution, PR URL parsing, managed clone/worktree operations, local-source
     validation, immutable endpoint pinning, GitHub publication, and trusted Git-metadata validation.
@@ -161,7 +162,7 @@ two read-only roots: the selected source tree first (therefore `cwd`) and its va
 second. This permits ordinary local `git`, `rg`, `sed`, `awk`, and other system inspection utilities without
 maintaining a bespoke set of read/list/search/diff tools.
 
-Seatbelt, not command curation, is the security boundary:
+The platform sandbox, not command curation, is the security boundary:
 
 - writes, outbound network, shared-memory IPC, and access outside declared roots are denied;
 - local-mode ignored paths are explicitly denied within the otherwise read-only source root;
@@ -304,6 +305,8 @@ uv run pytest
 make ci                                 # format-check, lint, strict mypy, tests + coverage
 ```
 
-Runtime prerequisites are macOS, Python 3.12+, `git`, authenticated `gh`, and `rg`. The checked-in `.mcp.json` and
-`opencode.jsonc` start the module through `uv` when the client is launched from the repository root. Machine-local
-configuration that contains credentials must remain untracked.
+Runtime prerequisites are macOS or Linux, Python 3.12+, `git`, authenticated `gh`, and `rg`. Linux also requires
+bubblewrap, system Python 3, libseccomp, `file`, and a system `git` under `/usr/bin`, plus a merged `/usr`, unprivileged
+user namespaces, and Landlock ABI 3 or newer. The checked-in `.mcp.json` and `opencode.jsonc` start the module through
+`uv` when the client is launched from the repository root. Machine-local configuration that contains credentials must
+remain untracked.

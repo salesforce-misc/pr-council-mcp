@@ -1,7 +1,8 @@
 # ReviewBench offline evaluation
 
 [ReviewBench](https://github.com/review-bench/ReviewBench) scores code-review findings against a curated golden set.
-Its packaged runner reviews inside a Linux container, and the review sandbox here is macOS Seatbelt. This harness
+Its packaged runner reviews inside a Linux container, which cannot host the review sandbox here: Seatbelt exists only
+on macOS, and containers usually deny the unprivileged user namespaces that bubblewrap needs on Linux. This harness
 therefore runs pr-council natively and hands its findings to ReviewBench's judge, which accepts findings from any
 source.
 
