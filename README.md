@@ -90,8 +90,8 @@ security add-generic-password -U -s localmcp -a openai_api_key -w
 security add-generic-password -U -s localmcp -a anthropic_api_key -w
 ```
 
-On Linux, store them in the Secret Service keyring, such as GNOME Keyring or KWallet. `secret-tool` also prompts for
-each key:
+On Linux, store them in the Secret Service keyring, such as GNOME Keyring or KWallet, with `secret-tool` (the
+`libsecret-tools` package on Debian or Ubuntu), which also prompts for each key:
 
 ```sh
 secret-tool store --label="localmcp openai_api_key" service localmcp username openai_api_key

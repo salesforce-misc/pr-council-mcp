@@ -14,7 +14,9 @@ Python version information. Never include credentials, private repository conten
 
 ## Development setup
 
-The project currently supports macOS and Python 3.12 through 3.14. Install the locked development environment:
+The project supports macOS and Linux with Python 3.12 through 3.14. The test suite runs the review sandbox for real
+and fails, rather than skips, on a host that cannot enforce it, so on Linux first install the sandbox prerequisites
+listed in the [Quickstart](README.md#quickstart). Install the locked development environment:
 
 ```bash
 uv sync --frozen
