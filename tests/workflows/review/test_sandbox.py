@@ -50,6 +50,12 @@ async def _assert_inspects_diff(sandbox, base_sha, head_sha):
     assert "print('head')" in inspected.stdout
 
 
+def _assert_denied(result, secret):
+    # Exit code 126 is the shell check's rejection; the denial must come from the sandbox itself.
+    assert result.exit_code not in (0, 126), result
+    assert secret not in result.stdout + result.stderr
+
+
 async def test_local_source_profile_allows_inspection_and_hides_excluded_paths(tmp_path):
     repository = tmp_path / "repo"
     base_sha, head_sha = _commit_base_and_head(repository, gitignore=".env\nbuild/\n")
@@ -68,9 +74,7 @@ async def test_local_source_profile_allows_inspection_and_hides_excluded_paths(t
 
     await _assert_inspects_diff(sandbox, base_sha, head_sha)
     for command in ("cat .env", "cat build/output", "ls .git/hooks", "printf changed > app.py"):
-        result = await sandbox.run(command)
-        assert result.exit_code != 0, result
-        assert "ignored-secret" not in result.stdout + result.stderr
+        _assert_denied(await sandbox.run(command), "ignored-secret")
     assert (repository / "app.py").read_text() == "print('head')\n"
 
 
@@ -96,8 +100,6 @@ async def test_managed_worktree_profile_reads_shared_git_metadata_read_only(tmp_
         "printf changed > app.py",
         f"git update-ref refs/heads/escaped {head_sha}",
     ):
-        result = await sandbox.run(command)
-        assert result.exit_code != 0, result
-        assert "outside-secret" not in result.stdout + result.stderr
+        _assert_denied(await sandbox.run(command), "outside-secret")
     assert (worktree_path / "app.py").read_text() == "print('head')\n"
     assert "refs/heads/escaped" not in _git(repo_path, "show-ref")

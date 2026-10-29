@@ -54,15 +54,16 @@ gh auth login
 gh auth status
 ```
 
-On Linux, review agents run in a bubblewrap sandbox that only runs system tools from `/usr/bin`, `/bin`, `/usr/sbin`,
-and `/sbin`, so install `git` from your distribution along with the sandbox's dependencies. On Debian or Ubuntu:
+On Linux, review agents run in a bubblewrap sandbox that finds tools only in supported Nix profiles and `/usr/bin`,
+`/bin`, `/usr/sbin`, and `/sbin`, never your `PATH`, so install `file` and `git` there along with the sandbox's
+dependencies. On Debian or Ubuntu:
 
 ```sh
-sudo apt-get install bubblewrap python3 libseccomp2 libc-bin file git
+sudo apt-get install bubblewrap bash libseccomp2 file git
 ```
 
-The host must be an x86-64 or AArch64 glibc system with a merged `/usr`, permit unprivileged user namespaces, and
-enable Landlock ABI 3 or newer. Reviews fail rather than run unsandboxed when it does not. See localmcplib's
+Bubblewrap must be 0.6.3 or newer, and the x86-64 or AArch64 host must permit unprivileged user and cgroup namespaces.
+Reviews fail rather than run unsandboxed otherwise. See localmcplib's
 [Linux sandbox support](https://github.com/salesforce-misc/localmcplib/blob/main/docs/linux-sandbox.md) for details.
 
 On first launch, the server creates `~/.config/localmcp/localmcp.toml` (or the path beneath `$XDG_CONFIG_HOME`) with
@@ -152,9 +153,12 @@ the exact revision-bound preview, and publishes only after explicit approval. Re
 and publication revalidates the PR revision and approved payload before writing.
 
 By default the server prepares an isolated managed worktree. Reviewer and deliberator models receive one bounded Bash
-tool inside a read-only sandbox: Seatbelt on macOS, and bubblewrap with Landlock and seccomp on Linux. They can inspect
-source and Git history with ordinary local tools, but cannot write files, access the network or credentials, or execute
-repository code. A local-checkout mode is also available when cloning a large repository is impractical.
+tool inside a read-only sandbox: Seatbelt on macOS, and bubblewrap and seccomp on Linux. They can inspect source and
+Git history with ordinary local tools, but cannot write files or access the network or credentials. Commands may name
+only the granted tools and a few shell builtins. On macOS, Seatbelt also stops a tool from launching an unrelated
+executable or a program in the repository. On Linux, a tool such as `find` or `awk` can still launch other programs,
+including repository code, inside the same read-only, offline sandbox. A local-checkout mode is also available when
+cloning a large repository is impractical.
 
 The MCP surface intentionally stays small: start, status, preview, commit, and cancel. Published reviews contain
 inline comments plus a `COMMENT`-only summary; the server never approves or rejects a pull request.

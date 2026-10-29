@@ -36,7 +36,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap python3 libseccomp2 libc-bin file git
+          sudo apt-get install -y bubblewrap bash libseccomp2 file git
           # The disposable runner must permit the user namespaces the sandbox needs.
           if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
