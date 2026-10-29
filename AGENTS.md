@@ -34,8 +34,9 @@ The current modules are organized as follows:
   and owned model lifetimes. The application supplies its effective endpoint, logical `llm_api_key`, and role model
   IDs.
 - **`localmcp.sandbox`** owns the generic model-facing Bash tool and its platform enforcement: Seatbelt on macOS, and
-  bubblewrap with Landlock and seccomp on Linux. Agents import only the portable `localmcp.sandbox` interface. The
-  review graph constructs its repository-specific root grants and exclusions.
+  bubblewrap and seccomp on Linux, behind a shared check of each command's Bash syntax and command names. Agents
+  import only the portable `localmcp.sandbox` interface. The review graph constructs its repository-specific root
+  grants and exclusions.
 - **`pr_council/review/`** — deterministic PR-review contracts:
   - `git.py` owns bounded `git`/`gh` execution, PR URL parsing, managed clone/worktree operations, local-source
     validation, immutable endpoint pinning, GitHub publication, and trusted Git-metadata validation.
@@ -170,6 +171,8 @@ The platform sandbox, not command curation, is the security boundary:
 - Git global/system config and terminal prompting are disabled;
 - command length, wall time, CPU time, output bytes, open files, process creation, and per-pass calls are bounded;
 - the model can read shared clone history, objects, refs, and branches through the Git metadata root;
+- command names must be granted tools or supported builtins, but on Linux that is only a shell-level check: a granted
+  tool such as `find` or `awk` can launch other programs, including repository code, inside the sandbox;
 - prompts additionally prohibit executing repository code, package managers, language runtimes, tests, or builds.
 
 The generic sandbox must remain ignorant of GitHub, repository-cache layout, worktree markers, and review SHAs. The
@@ -306,7 +309,7 @@ make ci                                 # format-check, lint, strict mypy, tests
 ```
 
 Runtime prerequisites are macOS or Linux, Python 3.12+, `git`, authenticated `gh`, and `rg`. Linux also requires
-bubblewrap, system Python 3, libseccomp, `file`, and a system `git` under `/usr/bin`, plus a merged `/usr`, unprivileged
-user namespaces, and Landlock ABI 3 or newer. The checked-in `.mcp.json` and `opencode.jsonc` start the module through
+bubblewrap 0.6.3 or newer, Bash, libseccomp, and `file` and `git` from the system or a supported Nix profile, plus
+unprivileged user and cgroup namespaces. The checked-in `.mcp.json` and `opencode.jsonc` start the module through
 `uv` when the client is launched from the repository root. Machine-local configuration that contains credentials must
 remain untracked.
