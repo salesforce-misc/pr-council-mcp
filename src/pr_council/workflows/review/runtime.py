@@ -67,6 +67,7 @@ class ReviewRuntime(WorkflowRuntime[OperationRecord, OperationStore]):
             max_repository_bytes=config.pr_review.limits.repository_size_mib * 1024 * 1024,
             allowed_hosts=config.pr_review.allowed_hosts,
             accounts=config.pr_review.github_accounts,
+            allowed_local_config=config.pr_review.allowed_local_git_config,
         )
         self.lock = RepoLock(self.root / "locks")
 

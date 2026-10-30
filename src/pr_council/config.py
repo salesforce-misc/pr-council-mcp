@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 from localmcp.config import ServerConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -16,8 +16,20 @@ _MODEL_ID = re.compile(r"^[A-Za-z0-9._:/-]+$")
 _HOSTNAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
 _GITHUB_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 _GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$")
+# Git config keys as `git config --list` prints them, lowercased: section, optional subsection, variable.
+_GIT_CONFIG_KEY = re.compile(r"^[a-z0-9-]+(?:\.[^\n\0]+)?\.[a-z][a-z0-9-]*$")
+# Their values name configuration or programs whose content validation never reads, so pinning a value pins nothing.
+_UNALLOWABLE_GIT_CONFIG_KEY = re.compile(r"^(?:include\.[^\n\0]+|includeif\.[^\n\0]+|core\.hookspath)$")
+# Common keys whose values Git runs as commands. They must list exact values; this guards against an over-broad
+# pattern but is not a security boundary, since keys absent from the allowlist are denied anyway.
+_GIT_COMMAND_KEY = re.compile(
+    r"^(?:filter\..+\.(?:clean|smudge|process)|diff\.(?:.+\.)?(?:textconv|command|external)|merge\..+\.driver|"
+    r"credential\.(?:.+\.)?helper|gpg\.(?:.+\.)?program|alias\..+|sequence\.editor|"
+    r"core\.(?:askpass|editor|fsmonitor|gitproxy|pager|sshcommand))$"
+)
 DEFAULT_ALLOWED_HOSTS = ("github.com",)
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
+LocalGitConfigValue = Annotated[str, Field(max_length=1024)]
 
 
 class ConfigError(PrCouncilError):
@@ -89,6 +101,23 @@ class PRReviewReasoningEffortConfig(BaseModel):
     aggregation: ReasoningEffort = "medium"
 
 
+class LocalGitConfigPattern(BaseModel):
+    """A regular expression that a local-source Git config value must match in full."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    pattern: str = Field(min_length=1, max_length=256)
+
+    @field_validator("pattern")
+    @classmethod
+    def _check_pattern(cls, value: str) -> str:
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"pattern is not a valid regular expression: {exc}") from exc
+        return value
+
+
 class PRReviewConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -100,6 +129,10 @@ class PRReviewConfig(BaseModel):
     min_severity: Severity = Severity.INFO
     # gh account per "host", "host/owner", or "host/owner/repo"; the most specific match wins.
     github_accounts: dict[str, str] = Field(default_factory=dict, max_length=100)
+    # Extra repository Git config a local-source checkout may carry, by key: exact values, or a full-match pattern.
+    allowed_local_git_config: dict[
+        str, Annotated[list[LocalGitConfigValue], Field(min_length=1, max_length=32)] | LocalGitConfigPattern
+    ] = Field(default_factory=dict, max_length=128)
 
     @field_validator("allowed_hosts")
     @classmethod
@@ -124,6 +157,28 @@ class PRReviewConfig(BaseModel):
                 raise ValueError(f'github_accounts has duplicate key "{key}"')
             accounts[normalized] = login
         return accounts
+
+    @field_validator("allowed_local_git_config")
+    @classmethod
+    def _check_allowed_local_git_config(
+        cls, value: dict[str, list[str] | LocalGitConfigPattern]
+    ) -> dict[str, list[str] | LocalGitConfigPattern]:
+        rules: dict[str, list[str] | LocalGitConfigPattern] = {}
+        for key, rule in value.items():
+            # Git compares section and variable names without case; local-source validation lowercases whole keys.
+            normalized = key.lower()
+            if len(normalized) > 256 or not _GIT_CONFIG_KEY.fullmatch(normalized):
+                raise ValueError(f'allowed_local_git_config key "{key}" is not a Git configuration key')
+            if _UNALLOWABLE_GIT_CONFIG_KEY.fullmatch(normalized):
+                raise ValueError(f'allowed_local_git_config cannot allow "{key}"')
+            if isinstance(rule, LocalGitConfigPattern) and _GIT_COMMAND_KEY.fullmatch(normalized):
+                raise ValueError(f'allowed_local_git_config key "{key}" runs a command and must list exact values')
+            if isinstance(rule, list) and any("\0" in item for item in rule):
+                raise ValueError(f'allowed_local_git_config values for "{key}" cannot contain NUL')
+            if normalized in rules:
+                raise ValueError(f'allowed_local_git_config has duplicate key "{key}"')
+            rules[normalized] = rule
+        return rules
 
     @model_validator(mode="after")
     def _check_account_hosts(self) -> PRReviewConfig:

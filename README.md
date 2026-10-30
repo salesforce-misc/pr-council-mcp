@@ -229,6 +229,26 @@ review = "high"
 Each model in the role receives the effort if it accepts one; a model that takes none runs without it. The provider
 rejects a level that a model does not support.
 
+Local-checkout reviews reject repository Git configuration that could run a program or carry a credential, in every
+local, per-worktree, and submodule config file. Inert settings such as sparse checkout, index format, fetch
+parallelism, the untracked cache, boolean `core.fsmonitor`, and `filter.<driver>.required` need no setup. To accept
+other keys, list the exact values a checkout may carry, or a full-match pattern for data-only keys:
+
+```toml
+[server.pr-council-mcp.pr_review.allowed_local_git_config]
+"filter.lfs.clean" = ["git-lfs clean -- %f"]
+"filter.lfs.smudge" = ["git-lfs smudge -- %f"]
+"filter.lfs.process" = ["git-lfs filter-process"]
+"tool.last-run" = { pattern = "[0-9]{1,12}" }
+```
+
+Each entry is a trust decision: validation runs `git status` outside the model sandbox, and Git may run an allowed
+filter or other command while it does. Prefer absolute program paths, since the server resolves bare names through
+its own `PATH` after dropping relative entries and directories inside the checkout. Keys whose values Git runs as
+commands accept only exact values, and `include`, `includeIf`, and `core.hooksPath` cannot be allowed. Models can
+read the checkout's Git config, so never allow a key that holds a credential. Changes take effect when the server
+restarts, including for reviews already in progress, which revalidate before preview and publication.
+
 Secrets resolve from declared environment aliases first and the shared `localmcp` OS-keyring service second. The
 native backend resolves `openai_api_key` and `anthropic_api_key` as required by the selected models. GitHub
 authentication is owned by `gh`, using the host-specific credentials described above. Secret values are never logged.
