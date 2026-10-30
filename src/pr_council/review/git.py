@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from pr_council.config import DEFAULT_ALLOWED_HOSTS, LocalGitConfigPattern, normalize_git_config_key
+from pr_council.config import (
+    DEFAULT_ALLOWED_HOSTS,
+    SAFE_LOCAL_GIT_CONFIG_KEY,
+    LocalGitConfigPattern,
+    git_config_key_label,
+    normalize_git_config_key,
+)
 from pr_council.review.models import PreviewComment, PrRef, ReviewError
 
 _SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -24,27 +30,11 @@ _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _COMMAND_TIMEOUT_SECONDS = 300.0
 _MAX_LOCAL_SANDBOX_EXCLUSIONS = 4_096
 _MAX_LOCAL_SUBMODULES = 1_024
-_SAFE_LOCAL_CONFIG_KEY = re.compile(
-    r"^(?:"
-    r"core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks|worktree|"
-    r"untrackedcache|sparsecheckout|sparsecheckoutcone)|"
-    r"extensions\.(?:objectformat|worktreeconfig|partialclone)|"
-    r"index\.(?:version|skiphash|sparse)|"
-    r"fetch\.(?:all|parallel)|"
-    r"http\.postbuffer|"
-    r"filter\..+\.required|"
-    r"remote\..+\.(?:url|pushurl|fetch|mirror|promisor|partialclonefilter|tagopt)|"
-    r"branch\..+\.(?:remote|merge|rebase)|"
-    r"submodule\..+\.(?:url|active)"
-    r")$"
-)
 # A boolean core.fsmonitor selects Git's built-in daemon; any other value is a hook command.
 _BOOLEAN_CONFIG_VALUE = re.compile(r"^(?:true|yes|on|1|false|no|off|0|)$", re.IGNORECASE)
 _MAX_LOCAL_CONFIG_PATTERN_VALUE = 1_024
 _GITHUB_TOKEN_ENV_VARS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 _REMOTE_URL_CONFIG_KEY = re.compile(r"^(?:remote\..+\.(?:url|pushurl)|submodule\..+\.url)$")
-# Subsections that errors may name; others, such as URLs, could carry a credential.
-_DISPLAYABLE_CONFIG_SUBSECTION = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _SENSITIVE_GIT_METADATA_NAMES = (
     "AUTO_MERGE",
     "BISECT_LOG",
@@ -93,15 +83,6 @@ def _trusted_search_path(env: Mapping[str, str], untrusted: Collection[Path]) ->
     if not entries:
         raise ReviewError("PATH has no absolute directories outside the source checkout")
     return os.pathsep.join(entries)
-
-
-def _config_key_label(key: str) -> str:
-    """Name a Git config key for an error, hiding a subsection that might carry a credential."""
-    section, _, rest = key.partition(".")
-    subsection, dot, variable = rest.rpartition(".")
-    if not dot or _DISPLAYABLE_CONFIG_SUBSECTION.fullmatch(subsection):
-        return key
-    return f"{section}.<subsection>.{variable}"
 
 
 def parse_pr_url(value: str, *, allowed_hosts: Collection[str] = DEFAULT_ALLOWED_HOSTS) -> PrRef:
@@ -222,6 +203,8 @@ class GitHubCli:
         self, command: str, args: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None
     ) -> str:
         base_env = os.environ if env is None else env
+        # Without cwd, a command runs in the server's own directory. Its absolute PATH entries stay the operator's
+        # choice: excluding them would drop every entry for a server started in "/" or the home directory.
         untrusted = [root for root in (cwd, self._local_source) if root is not None]
         env = {**base_env, "PATH": _trusted_search_path(base_env, untrusted)}
         try:
@@ -510,7 +493,7 @@ class GitHubCli:
 
     def _validate_local_config_entry(self, key: str, value: str | None) -> None:
         normalized_key = key.lower()
-        if _SAFE_LOCAL_CONFIG_KEY.fullmatch(normalized_key) or (
+        if SAFE_LOCAL_GIT_CONFIG_KEY.fullmatch(normalized_key) or (
             normalized_key == "core.fsmonitor" and (value is None or _BOOLEAN_CONFIG_VALUE.fullmatch(value))
         ):
             if _REMOTE_URL_CONFIG_KEY.fullmatch(normalized_key):
@@ -524,7 +507,7 @@ class GitHubCli:
                 ):
                     raise ReviewError("local source Git remote URL contains credentials or secret-bearing fields")
             return
-        label = _config_key_label(key)
+        label = git_config_key_label(key)
         rule = self.allowed_local_config.get(normalize_git_config_key(key))
         if rule is None:
             raise ReviewError(f'local source Git configuration key "{label}" is not safe for model access')

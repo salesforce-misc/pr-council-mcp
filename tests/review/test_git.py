@@ -536,7 +536,7 @@ async def test_validate_local_source_rejects_unsafe_per_worktree_config(tmp_path
     _git(repository, "config", "extensions.worktreeConfig", "true")
     _git(repository, "config", "--worktree", "filter.probe.clean", "cat")
 
-    with pytest.raises(ReviewError, match='"filter.probe.clean" is not safe'):
+    with pytest.raises(ReviewError, match='"filter.<subsection>.clean" is not safe'):
         await GitHubCli().validate_local_source(repository, tmp_path, base_sha=head_sha, head_sha=head_sha)
 
 
@@ -567,7 +567,7 @@ async def test_validate_local_source_validates_submodule_config_before_status_ru
         await cli.validate_local_source(repository, tmp_path, base_sha=head_sha, head_sha=head_sha)
         assert marker.exists()
     else:
-        with pytest.raises(ReviewError, match='"filter.probe.clean" is not safe'):
+        with pytest.raises(ReviewError, match='"filter.<subsection>.clean" is not safe'):
             await cli.validate_local_source(repository, tmp_path, base_sha=head_sha, head_sha=head_sha)
         assert not marker.exists()
 
@@ -652,13 +652,12 @@ async def test_validate_local_source_permits_only_allowed_local_config_values(tm
     ("config", "label", "hidden"),
     [
         # Git compares subsections exactly, so a rule for one spelling does not allow another.
-        ('[tool "sub"]\n\tmode = fast\n', "tool.sub.mode", None),
+        ('[tool "sub"]\n\tmode = fast\n', "tool.<subsection>.mode", None),
         ('[url "https://user:secret@example.invalid/"]\n\tinsteadOf = x\n', "url.<subsection>.insteadof", "secret"),
+        ('[tool "ghp_0123456789abcdef"]\n\tmode = fast\n', "tool.<subsection>.mode", "ghp_0123456789abcdef"),
     ],
 )
-async def test_validate_local_source_rejects_unallowed_keys_without_naming_unsafe_subsections(
-    tmp_path, config, label, hidden
-):
+async def test_validate_local_source_rejects_unallowed_keys_without_naming_subsections(tmp_path, config, label, hidden):
     repository = tmp_path / "repo"
     head_sha = _committed_repository(repository)
     with (repository / ".git" / "config").open("a") as config_file:

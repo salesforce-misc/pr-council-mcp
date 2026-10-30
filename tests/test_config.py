@@ -133,7 +133,7 @@ def test_allowed_local_git_config_normalizes_keys_and_accepts_exact_values_or_pa
                     "allowed_local_git_config": {
                         "Filter.LFS.Clean": ["git-lfs clean -- %f"],
                         "filter.lfs.clean": ["git-lfs clean -- %f"],
-                        "Remote.Origin.URL": ["https://example.invalid/repo.git"],
+                        "Tool.Origin.Mode": ["fast"],
                         "tool.last-run": {"pattern": "[0-9]{1,12}"},
                         "tool.empty": [""],
                     }
@@ -144,7 +144,7 @@ def test_allowed_local_git_config_normalizes_keys_and_accepts_exact_values_or_pa
 
     # Git ignores case in section and variable names but not in subsections.
     rules = config.pr_review.allowed_local_git_config
-    assert set(rules) == {"filter.LFS.clean", "filter.lfs.clean", "remote.Origin.url", "tool.last-run", "tool.empty"}
+    assert set(rules) == {"filter.LFS.clean", "filter.lfs.clean", "tool.Origin.mode", "tool.last-run", "tool.empty"}
     assert rules["filter.LFS.clean"] == ["git-lfs clean -- %f"]
     assert rules["tool.last-run"] == LocalGitConfigPattern(pattern="[0-9]{1,12}")
     assert rules["tool.empty"] == [""]
@@ -166,6 +166,13 @@ def test_allowed_local_git_config_normalizes_keys_and_accepts_exact_values_or_pa
         ({"remote.origin.uploadPack": {"pattern": ".*"}}, "runs a command and must list exact values"),
         ({"submodule.child.update": {"pattern": ".*"}}, "runs a command and must list exact values"),
         ({"gpg.ssh.defaultKeyCommand": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"imap.tunnel": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"sendemail.sendmailCmd": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"sendemail.work.sendmailCmd": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"hook.lint.command": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        # Built-in keys keep their own checks, such as remote URL transport and credential validation.
+        ({"Remote.Origin.URL": ["ext::sh -c true"]}, "is accepted by default and cannot be listed"),
+        ({"filter.lfs.required": ["true"]}, "is accepted by default and cannot be listed"),
         ({"tool.mode": []}, "at least 1 item"),
         ({"tool.mode": ["x"] * 33}, "at most 32 items"),
         ({"tool.mode": ["a" * 1025]}, "at most 1024 characters"),
@@ -179,3 +186,11 @@ def test_allowed_local_git_config_normalizes_keys_and_accepts_exact_values_or_pa
 def test_allowed_local_git_config_rejects_invalid_rules(rules: dict[str, object], message: str) -> None:
     with pytest.raises(ConfigError, match=message):
         parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"allowed_local_git_config": rules}}))
+
+
+def test_allowed_local_git_config_errors_never_echo_subsections_or_input() -> None:
+    rules = {"credential.https://user:secret-token@example.invalid.helper": {"pattern": ".*"}}
+
+    with pytest.raises(ConfigError, match='"credential.<subsection>.helper" runs a command') as error:
+        parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"allowed_local_git_config": rules}}))
+    assert "secret-token" not in str(error.value)

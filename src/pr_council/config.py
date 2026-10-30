@@ -18,6 +18,22 @@ _GITHUB_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 _GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$")
 # Git config keys as normalize_git_config_key returns them: section, optional subsection, variable.
 _GIT_CONFIG_KEY = re.compile(r"^[a-z0-9-]+(?:\.[^\n\0]+)?\.[a-z][a-z0-9-]*$")
+# Keys local-source validation accepts without an allowlist entry, with remote URLs checked for executable transports
+# and credentials. An entry could not relax those checks, so these keys cannot be listed.
+SAFE_LOCAL_GIT_CONFIG_KEY = re.compile(
+    r"^(?:"
+    r"core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks|worktree|"
+    r"untrackedcache|sparsecheckout|sparsecheckoutcone)|"
+    r"extensions\.(?:objectformat|worktreeconfig|partialclone)|"
+    r"index\.(?:version|skiphash|sparse)|"
+    r"fetch\.(?:all|parallel)|"
+    r"http\.postbuffer|"
+    r"filter\..+\.required|"
+    r"remote\..+\.(?:url|pushurl|fetch|mirror|promisor|partialclonefilter|tagopt)|"
+    r"branch\..+\.(?:remote|merge|rebase)|"
+    r"submodule\..+\.(?:url|active)"
+    r")$"
+)
 # Their values name configuration or programs whose content validation never reads, so pinning a value pins nothing.
 _UNALLOWABLE_GIT_CONFIG_KEY = re.compile(r"^(?:include\.[^\n\0]+|includeif\.[^\n\0]+|core\.hookspath)$")
 # Known keys whose values Git runs as programs. They must list exact values; this guards against an over-broad
@@ -27,8 +43,8 @@ _GIT_COMMAND_KEY = re.compile(
     r"(?:difftool|mergetool|man|browser)\..+\.(?:cmd|path)|guitool\..+\.cmd|trailer\..+\.(?:cmd|command)|"
     r"tar\..+\.command|credential\.(?:.+\.)?helper|gpg\.(?:.+\.)?program|gpg\.ssh\.defaultkeycommand|"
     r"remote\..+\.(?:uploadpack|receivepack|vcs)|submodule\..+\.update|alias\..+|pager\..+|sequence\.editor|"
-    r"interactive\.difffilter|uploadpack\.packobjectshook|instaweb\.httpd|"
-    r"sendemail\.(?:.+\.)?(?:smtpserver|tocmd|cccmd|headercmd)|"
+    r"interactive\.difffilter|uploadpack\.packobjectshook|instaweb\.httpd|imap\.tunnel|hook\..+\.command|"
+    r"sendemail\.(?:.+\.)?(?:smtpserver|sendmailcmd|tocmd|cccmd|headercmd)|"
     r"core\.(?:alternaterefscommand|askpass|editor|fsmonitor|gitproxy|pager|sshcommand))$"
 )
 DEFAULT_ALLOWED_HOSTS = ("github.com",)
@@ -42,6 +58,13 @@ def normalize_git_config_key(key: str) -> str:
     section, _, rest = key.partition(".")
     subsection, dot, variable = rest.rpartition(".")
     return f"{section.lower()}.{subsection}{dot}{variable.lower()}"
+
+
+def git_config_key_label(key: str) -> str:
+    """Name a Git config key for an error without its subsection, which may carry a credential."""
+    section, _, rest = key.partition(".")
+    subsection, dot, variable = rest.rpartition(".")
+    return f"{section}.<subsection>.{variable}" if dot else key
 
 
 class ConfigError(PrCouncilError):
@@ -131,7 +154,8 @@ class LocalGitConfigPattern(BaseModel):
 
 
 class PRReviewConfig(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    # Errors name allowed_local_git_config keys only through git_config_key_label, never by echoing input.
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS), min_length=1, max_length=20)
     models: PRReviewModelsConfig = Field(default_factory=PRReviewModelsConfig)
@@ -178,16 +202,19 @@ class PRReviewConfig(BaseModel):
         rules: dict[str, list[str] | LocalGitConfigPattern] = {}
         for key, rule in value.items():
             normalized = normalize_git_config_key(key)
+            label = git_config_key_label(key)
             if len(normalized) > 256 or not _GIT_CONFIG_KEY.fullmatch(normalized):
-                raise ValueError(f'allowed_local_git_config key "{key}" is not a Git configuration key')
+                raise ValueError(f'allowed_local_git_config key "{label}" is not a Git configuration key')
             if _UNALLOWABLE_GIT_CONFIG_KEY.fullmatch(normalized):
-                raise ValueError(f'allowed_local_git_config cannot allow "{key}"')
+                raise ValueError(f'allowed_local_git_config cannot allow "{label}"')
+            if SAFE_LOCAL_GIT_CONFIG_KEY.fullmatch(normalized):
+                raise ValueError(f'allowed_local_git_config key "{label}" is accepted by default and cannot be listed')
             if isinstance(rule, LocalGitConfigPattern) and _GIT_COMMAND_KEY.fullmatch(normalized):
-                raise ValueError(f'allowed_local_git_config key "{key}" runs a command and must list exact values')
+                raise ValueError(f'allowed_local_git_config key "{label}" runs a command and must list exact values')
             if isinstance(rule, list) and any("\0" in item for item in rule):
-                raise ValueError(f'allowed_local_git_config values for "{key}" cannot contain NUL')
+                raise ValueError(f'allowed_local_git_config values for "{label}" cannot contain NUL')
             if normalized in rules:
-                raise ValueError(f'allowed_local_git_config has duplicate key "{key}"')
+                raise ValueError(f'allowed_local_git_config has duplicate key "{label}"')
             rules[normalized] = rule
         return rules
 
