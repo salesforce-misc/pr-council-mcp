@@ -16,20 +16,32 @@ _MODEL_ID = re.compile(r"^[A-Za-z0-9._:/-]+$")
 _HOSTNAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
 _GITHUB_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 _GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$")
-# Git config keys as `git config --list` prints them, lowercased: section, optional subsection, variable.
+# Git config keys as normalize_git_config_key returns them: section, optional subsection, variable.
 _GIT_CONFIG_KEY = re.compile(r"^[a-z0-9-]+(?:\.[^\n\0]+)?\.[a-z][a-z0-9-]*$")
 # Their values name configuration or programs whose content validation never reads, so pinning a value pins nothing.
 _UNALLOWABLE_GIT_CONFIG_KEY = re.compile(r"^(?:include\.[^\n\0]+|includeif\.[^\n\0]+|core\.hookspath)$")
-# Common keys whose values Git runs as commands. They must list exact values; this guards against an over-broad
+# Known keys whose values Git runs as programs. They must list exact values; this guards against an over-broad
 # pattern but is not a security boundary, since keys absent from the allowlist are denied anyway.
 _GIT_COMMAND_KEY = re.compile(
     r"^(?:filter\..+\.(?:clean|smudge|process)|diff\.(?:.+\.)?(?:textconv|command|external)|merge\..+\.driver|"
-    r"credential\.(?:.+\.)?helper|gpg\.(?:.+\.)?program|alias\..+|sequence\.editor|"
-    r"core\.(?:askpass|editor|fsmonitor|gitproxy|pager|sshcommand))$"
+    r"(?:difftool|mergetool|man|browser)\..+\.(?:cmd|path)|guitool\..+\.cmd|trailer\..+\.(?:cmd|command)|"
+    r"tar\..+\.command|credential\.(?:.+\.)?helper|gpg\.(?:.+\.)?program|gpg\.ssh\.defaultkeycommand|"
+    r"remote\..+\.(?:uploadpack|receivepack|vcs)|submodule\..+\.update|alias\..+|pager\..+|sequence\.editor|"
+    r"interactive\.difffilter|uploadpack\.packobjectshook|instaweb\.httpd|"
+    r"sendemail\.(?:.+\.)?(?:smtpserver|tocmd|cccmd|headercmd)|"
+    r"core\.(?:alternaterefscommand|askpass|editor|fsmonitor|gitproxy|pager|sshcommand))$"
 )
 DEFAULT_ALLOWED_HOSTS = ("github.com",)
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 LocalGitConfigValue = Annotated[str, Field(max_length=1024)]
+
+
+def normalize_git_config_key(key: str) -> str:
+    """Lowercase a Git config key's section and variable names, which Git compares without case, but not its
+    subsection, which Git compares exactly."""
+    section, _, rest = key.partition(".")
+    subsection, dot, variable = rest.rpartition(".")
+    return f"{section.lower()}.{subsection}{dot}{variable.lower()}"
 
 
 class ConfigError(PrCouncilError):
@@ -165,8 +177,7 @@ class PRReviewConfig(BaseModel):
     ) -> dict[str, list[str] | LocalGitConfigPattern]:
         rules: dict[str, list[str] | LocalGitConfigPattern] = {}
         for key, rule in value.items():
-            # Git compares section and variable names without case; local-source validation lowercases whole keys.
-            normalized = key.lower()
+            normalized = normalize_git_config_key(key)
             if len(normalized) > 256 or not _GIT_CONFIG_KEY.fullmatch(normalized):
                 raise ValueError(f'allowed_local_git_config key "{key}" is not a Git configuration key')
             if _UNALLOWABLE_GIT_CONFIG_KEY.fullmatch(normalized):

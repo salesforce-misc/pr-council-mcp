@@ -132,6 +132,8 @@ def test_allowed_local_git_config_normalizes_keys_and_accepts_exact_values_or_pa
                 "pr_review": {
                     "allowed_local_git_config": {
                         "Filter.LFS.Clean": ["git-lfs clean -- %f"],
+                        "filter.lfs.clean": ["git-lfs clean -- %f"],
+                        "Remote.Origin.URL": ["https://example.invalid/repo.git"],
                         "tool.last-run": {"pattern": "[0-9]{1,12}"},
                         "tool.empty": [""],
                     }
@@ -140,8 +142,10 @@ def test_allowed_local_git_config_normalizes_keys_and_accepts_exact_values_or_pa
         )
     )
 
+    # Git ignores case in section and variable names but not in subsections.
     rules = config.pr_review.allowed_local_git_config
-    assert rules["filter.lfs.clean"] == ["git-lfs clean -- %f"]
+    assert set(rules) == {"filter.LFS.clean", "filter.lfs.clean", "remote.Origin.url", "tool.last-run", "tool.empty"}
+    assert rules["filter.LFS.clean"] == ["git-lfs clean -- %f"]
     assert rules["tool.last-run"] == LocalGitConfigPattern(pattern="[0-9]{1,12}")
     assert rules["tool.empty"] == [""]
 
@@ -157,6 +161,11 @@ def test_allowed_local_git_config_normalizes_keys_and_accepts_exact_values_or_pa
         ({"core.hooksPath": ["/dev/null"]}, "cannot allow"),
         ({"filter.lfs.clean": {"pattern": "git-lfs .*"}}, "runs a command and must list exact values"),
         ({"core.fsmonitor": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"pager.log": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"mergetool.Tool.cmd": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"remote.origin.uploadPack": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"submodule.child.update": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"gpg.ssh.defaultKeyCommand": {"pattern": ".*"}}, "runs a command and must list exact values"),
         ({"tool.mode": []}, "at least 1 item"),
         ({"tool.mode": ["x"] * 33}, "at most 32 items"),
         ({"tool.mode": ["a" * 1025]}, "at most 1024 characters"),
@@ -164,6 +173,7 @@ def test_allowed_local_git_config_normalizes_keys_and_accepts_exact_values_or_pa
         ({"tool.mode": {"pattern": "("}}, "not a valid regular expression"),
         ({"tool.mode": {"pattern": ""}}, "at least 1 character"),
         ({"tool.mode": ["a"], "Tool.Mode": ["b"]}, "duplicate key"),
+        ({"tool.Sub.mode": ["a"], "TOOL.Sub.MODE": ["b"]}, "duplicate key"),
     ],
 )
 def test_allowed_local_git_config_rejects_invalid_rules(rules: dict[str, object], message: str) -> None:

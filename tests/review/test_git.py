@@ -624,8 +624,10 @@ async def test_validate_local_source_rejects_executable_values_for_built_in_keys
         ("[tool]\n\tmode = fast\n", {"tool.mode": ["fast", "slow"]}, True),
         ("[tool]\n\tmode = unexpected-value\n", {"tool.mode": ["fast", "slow"]}, False),
         ("[tool]\n\tmode = fast\n\tmode = unexpected-value\n", {"tool.mode": ["fast"]}, False),
-        ("[tool]\n\tmode\n", {"tool.mode": ["", "true"]}, False),
-        ('[Tool "Sub"]\n\tMode = fast\n', {"Tool.Sub.Mode": ["fast"]}, True),
+        # A key written without "=" is boolean true.
+        ("[tool]\n\tmode\n", {"tool.mode": ["true"]}, True),
+        ("[tool]\n\tmode\n", {"tool.mode": ["", "false"]}, False),
+        ('[Tool "Sub"]\n\tMode = fast\n', {"tool.Sub.MODE": ["fast"]}, True),
         ("[tool]\n\tlast-run = 1700000000\n", {"tool.last-run": LocalGitConfigPattern(pattern="[0-9]{1,12}")}, True),
         ("[tool]\n\tlast-run = 1700000000x\n", {"tool.last-run": LocalGitConfigPattern(pattern="[0-9]{1,12}")}, False),
         (f"[tool]\n\tnote = {'a' * 1025}\n", {"tool.note": LocalGitConfigPattern(pattern="a+")}, False),
@@ -644,6 +646,30 @@ async def test_validate_local_source_permits_only_allowed_local_config_values(tm
         with pytest.raises(ReviewError, match="has a value that allowed_local_git_config does not permit") as error:
             await cli.validate_local_source(repository, tmp_path, base_sha=head_sha, head_sha=head_sha)
         assert "unexpected-value" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("config", "label", "hidden"),
+    [
+        # Git compares subsections exactly, so a rule for one spelling does not allow another.
+        ('[tool "sub"]\n\tmode = fast\n', "tool.sub.mode", None),
+        ('[url "https://user:secret@example.invalid/"]\n\tinsteadOf = x\n', "url.<subsection>.insteadof", "secret"),
+    ],
+)
+async def test_validate_local_source_rejects_unallowed_keys_without_naming_unsafe_subsections(
+    tmp_path, config, label, hidden
+):
+    repository = tmp_path / "repo"
+    head_sha = _committed_repository(repository)
+    with (repository / ".git" / "config").open("a") as config_file:
+        config_file.write(config)
+    cli = GitHubCli(allowed_local_config={"tool.Sub.mode": ["fast"]})
+
+    with pytest.raises(ReviewError, match="is not safe for model access") as error:
+        await cli.validate_local_source(repository, tmp_path, base_sha=head_sha, head_sha=head_sha)
+    assert f'"{label}"' in str(error.value)
+    if hidden is not None:
+        assert hidden not in str(error.value)
 
 
 async def test_validate_local_source_never_runs_programs_from_checkout_path_entries(monkeypatch, tmp_path):
@@ -957,6 +983,50 @@ async def test_diff_targets_the_pr_repository_explicitly(monkeypatch, tmp_path):
 
     assert await cli.diff(tmp_path, ref) == "diff"
     assert captured["args"] == ["pr", "diff", "42", "--repo", "github.com/acme/widget"]
+
+
+def _executable(path: Path, script: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\n{script}\n")
+    path.chmod(0o755)
+
+
+async def test_gh_calls_never_run_programs_from_the_working_directory_or_local_checkout(monkeypatch, tmp_path):
+    checkout = tmp_path / "checkout"
+    marker = tmp_path / "checkout-program-ran"
+    for planted in (checkout / "gh", checkout / "bin" / "gh"):
+        _executable(planted, f"touch '{marker}'")
+    trusted = tmp_path / "trusted-bin"
+    _executable(trusted / "gh", "echo trusted")
+    monkeypatch.setenv("PATH", os.pathsep.join(["", "bin", str(checkout / "bin"), str(trusted)]))
+    monkeypatch.chdir(checkout)
+    ref = PrRef(host="github.com", owner="acme", repo="widget", number=42)
+    local = GitHubCli().bind("github.com", None, local_source=checkout)
+
+    # The diff runs in the checkout; other calls inherit the server's working directory.
+    assert await GitHubCli().diff(checkout, ref) == "trusted\n"
+    assert await local.diff(checkout, ref) == "trusted\n"
+    assert await local.authenticated_user("github.com") == "trusted"
+    assert not marker.exists()
+
+
+async def test_trusted_commands_get_resolved_absolute_path_entries_or_the_platform_default(monkeypatch, tmp_path):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    link = tmp_path / "tools-link"
+    link.symlink_to(tools)
+    work = tmp_path / "work"
+    work.mkdir()
+    print_path = ["-c", 'printf %s "$PATH"']
+    monkeypatch.setenv("PATH", os.pathsep.join(["", "bin", str(link), *os.get_exec_path()]))
+
+    entries = (await GitHubCli()._run("sh", print_path, cwd=work)).split(os.pathsep)
+
+    assert entries[0] == str(tools.resolve())
+    assert "" not in entries and "bin" not in entries and str(link) not in entries
+    monkeypatch.delenv("PATH")
+    default = dict.fromkeys(str(Path(entry).resolve()) for entry in os.defpath.split(os.pathsep) if entry)
+    assert await GitHubCli()._run("sh", print_path) == os.pathsep.join(default)
 
 
 def _ref(host="github.com", owner="acme", repo="repo"):

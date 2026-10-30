@@ -139,10 +139,11 @@ metadata roots are unsupported. These properties and the ignored-path snapshot a
 publication. Local repositories are caller-owned and must never be removed or mutated during cleanup.
 Local metadata validation reads every non-command config scope, including per-worktree `config.worktree`, and
 rejects executable, include-based, or credential-bearing repository configuration unless
-`[pr_review.allowed_local_git_config]` permits the exact value; model sandboxes deny hooks, reflogs, and transient Git
+`[pr_review.allowed_local_git_config]` permits the value; model sandboxes deny hooks, reflogs, and transient Git
 state while retaining the minimal repository config needed by Git. Each submodule's metadata and configuration is
-validated before any recursive command such as `git status` can run its filters. Trusted Git calls drop relative
-`PATH` entries and directories inside the checkout, so the checkout cannot supply the programs they run.
+validated before any recursive command such as `git status` can run its filters. Every trusted `git` and `gh` call
+drops relative `PATH` entries and directories inside its working directory or local-source checkout, so neither can
+supply the programs it runs.
 
 Local mode intentionally reviews the caller-owned live checkout so it can avoid a second full worktree for very large
 trees. The server and checkout owner therefore share one OS-UID trust boundary: callers must keep the checkout stable
@@ -269,10 +270,11 @@ per-model resolution is persisted with the model selection. The provider remains
 supports.
 
 `[pr_review.allowed_local_git_config]` maps extra local-source Git config keys to exact values or a full-match
-`pattern`. Keys are lowercased, keys whose values Git runs as commands require exact values, and `include`,
-`includeIf`, and `core.hooksPath` are never allowable. Error messages name the key but never echo its value. The
-allowlist is read from current configuration, not persisted per operation: it governs a security check, so a
-tightened allowlist must apply to in-flight operations when they revalidate.
+`pattern`. Section and variable names are lowercased while subsections keep their case, as Git compares them. Known
+keys whose values Git runs as programs require exact values, and `include`, `includeIf`, and `core.hooksPath` are
+never allowable. Error messages name the key, hiding any subsection that could carry a credential, but never echo its
+value. The allowlist is read from current configuration, not persisted per operation: it governs a security check, so
+a tightened allowlist must apply to in-flight operations when they revalidate.
 
 `[pr_review.limits]` bounds per-pass Bash calls, matrix size, model concurrency, prepared repository size, command
 timeout, attempts per model call, and retry delays. Every Bash result reports the remaining budget. Model output is

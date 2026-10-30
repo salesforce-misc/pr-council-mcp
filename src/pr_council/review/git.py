@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from pr_council.config import DEFAULT_ALLOWED_HOSTS, LocalGitConfigPattern
+from pr_council.config import DEFAULT_ALLOWED_HOSTS, LocalGitConfigPattern, normalize_git_config_key
 from pr_council.review.models import PreviewComment, PrRef, ReviewError
 
 _SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -43,6 +43,8 @@ _BOOLEAN_CONFIG_VALUE = re.compile(r"^(?:true|yes|on|1|false|no|off|0|)$", re.IG
 _MAX_LOCAL_CONFIG_PATTERN_VALUE = 1_024
 _GITHUB_TOKEN_ENV_VARS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 _REMOTE_URL_CONFIG_KEY = re.compile(r"^(?:remote\..+\.(?:url|pushurl)|submodule\..+\.url)$")
+# Subsections that errors may name; others, such as URLs, could carry a credential.
+_DISPLAYABLE_CONFIG_SUBSECTION = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _SENSITIVE_GIT_METADATA_NAMES = (
     "AUTO_MERGE",
     "BISECT_LOG",
@@ -69,6 +71,37 @@ class LocalSourceSnapshot:
 
     git_metadata_root: Path
     excluded_paths: tuple[Path, ...]
+
+
+def _trusted_search_path(env: Mapping[str, str], untrusted: Collection[Path]) -> str:
+    """Return env's program search path without entries that a working directory or checkout could supply.
+
+    Programs start after changing into their working directory, so an empty or relative entry resolves inside it.
+    Entries are passed on resolved, so a symlink retargeted after this check cannot redirect them.
+    """
+    roots = [root.resolve() for root in untrusted]
+    entries: dict[str, None] = {}
+    for entry in os.get_exec_path(env):
+        if not os.path.isabs(entry):
+            continue
+        try:
+            resolved = Path(entry).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if not any(resolved.is_relative_to(root) for root in roots):
+            entries[os.fspath(resolved)] = None
+    if not entries:
+        raise ReviewError("PATH has no absolute directories outside the source checkout")
+    return os.pathsep.join(entries)
+
+
+def _config_key_label(key: str) -> str:
+    """Name a Git config key for an error, hiding a subsection that might carry a credential."""
+    section, _, rest = key.partition(".")
+    subsection, dot, variable = rest.rpartition(".")
+    if not dot or _DISPLAYABLE_CONFIG_SUBSECTION.fullmatch(subsection):
+        return key
+    return f"{section}.<subsection>.{variable}"
 
 
 def parse_pr_url(value: str, *, allowed_hosts: Collection[str] = DEFAULT_ALLOWED_HOSTS) -> PrRef:
@@ -109,11 +142,14 @@ class GitHubCli:
         self.allowed_hosts = frozenset(allowed_hosts)
         self.accounts = {key.lower(): login for key, login in (accounts or {}).items()}
         self.allowed_local_config: dict[str, frozenset[str] | re.Pattern[str]] = {
-            key.lower(): re.compile(rule.pattern) if isinstance(rule, LocalGitConfigPattern) else frozenset(rule)
+            normalize_git_config_key(key): (
+                re.compile(rule.pattern) if isinstance(rule, LocalGitConfigPattern) else frozenset(rule)
+            )
             for key, rule in (allowed_local_config or {}).items()
         }
         self._bound_host: str | None = None
         self._account: str | None = None
+        self._local_source: Path | None = None
 
     def account_for(self, ref: PrRef) -> str | None:
         """Return the mapped login for a PR, preferring repository over owner over host matches."""
@@ -123,18 +159,20 @@ class GitHubCli:
                 return self.accounts[key]
         return None
 
-    def bind(self, host: str, account: str | None) -> GitHubCli:
+    def bind(self, host: str, account: str | None, *, local_source: Path | None = None) -> GitHubCli:
         """Return an adapter whose GitHub calls for ``host`` authenticate as ``account``.
 
         Each call receives the account's token in its own environment, so nothing
         shared, such as gh's active account, is changed. ``None`` keeps the
-        inherited environment.
+        inherited environment. Every program the adapter starts for a local review
+        is found outside ``local_source``, the caller's checkout.
         """
         if host not in self.allowed_hosts:
             raise ReviewError("GitHub host is not allowed by server configuration")
         bound = copy.copy(self)
         bound._bound_host = host
         bound._account = account
+        bound._local_source = local_source
         return bound
 
     async def _communicate(self, process: asyncio.subprocess.Process, command: str) -> tuple[bytes, bytes]:
@@ -183,6 +221,9 @@ class GitHubCli:
     async def _run(
         self, command: str, args: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None
     ) -> str:
+        base_env = os.environ if env is None else env
+        untrusted = [root for root in (cwd, self._local_source) if root is not None]
+        env = {**base_env, "PATH": _trusted_search_path(base_env, untrusted)}
         try:
             process = await asyncio.create_subprocess_exec(
                 command,
@@ -266,20 +307,11 @@ class GitHubCli:
     @staticmethod
     def _local_git_env(repository: Path) -> dict[str, str]:
         env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
-        # Git, and the shell that runs allowed filter commands, start in the checkout, where an empty, relative, or
-        # in-checkout PATH entry would let checkout content choose which program runs.
-        search_path: list[str] = []
-        for entry in env.get("PATH", "").split(os.pathsep):
-            try:
-                if os.path.isabs(entry) and not Path(entry).resolve().is_relative_to(repository):
-                    search_path.append(entry)
-            except (OSError, RuntimeError):
-                continue
-        if not search_path:
-            raise ReviewError("PATH has no absolute directories outside the local source repository")
         return {
             **env,
-            "PATH": os.pathsep.join(search_path),
+            # Git, and the shell that runs allowed filter commands, may start in a submodule, so no program may come
+            # from anywhere in the repository.
+            "PATH": _trusted_search_path(env, [repository]),
             "GIT_CONFIG_COUNT": "2",
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_KEY_0": "core.fsmonitor",
@@ -492,17 +524,20 @@ class GitHubCli:
                 ):
                     raise ReviewError("local source Git remote URL contains credentials or secret-bearing fields")
             return
-        rule = self.allowed_local_config.get(normalized_key)
+        label = _config_key_label(key)
+        rule = self.allowed_local_config.get(normalize_git_config_key(key))
         if rule is None:
-            raise ReviewError(f'local source Git configuration key "{key}" is not safe for model access')
-        # Values are never echoed: an unexpected one may hold a credential.
-        if value is None or not (
-            value in rule
+            raise ReviewError(f'local source Git configuration key "{label}" is not safe for model access')
+        # A key written without "=" is boolean true. Values are never echoed: an unexpected one may hold a credential.
+        candidate = "true" if value is None else value
+        if not (
+            candidate in rule
             if isinstance(rule, frozenset)
-            else len(value) <= _MAX_LOCAL_CONFIG_PATTERN_VALUE and rule.fullmatch(value)
+            else len(candidate) <= _MAX_LOCAL_CONFIG_PATTERN_VALUE and rule.fullmatch(candidate)
         ):
             raise ReviewError(
-                f'local source Git configuration key "{key}" has a value that allowed_local_git_config does not permit'
+                f'local source Git configuration key "{label}" has a value that allowed_local_git_config does not '
+                "permit"
             )
 
     async def validate_local_source(

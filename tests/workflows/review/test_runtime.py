@@ -695,7 +695,7 @@ def test_runtime_passes_allowed_local_git_config_to_the_git_adapter(tmp_path):
     config = Config(
         pr_review=PRReviewConfig(
             allowed_local_git_config={
-                "Filter.LFS.Clean": ["git-lfs clean -- %f"],
+                "Filter.lfs.Clean": ["git-lfs clean -- %f"],
                 "tool.last-run": LocalGitConfigPattern(pattern="[0-9]+"),
             }
         )
