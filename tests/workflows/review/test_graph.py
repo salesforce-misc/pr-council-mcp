@@ -88,9 +88,11 @@ class FakeGit:
         self.head_sha = "head-sha"
         self.login = "reviewer"
         self.bindings = []
+        self.local_sources = []
 
-    def bind(self, host, account):
+    def bind(self, host, account, *, local_source=None):
         self.bindings.append((host, account))
+        self.local_sources.append(local_source)
         return self
 
     async def clone_or_fetch(self, ref, base_dir):
@@ -492,6 +494,8 @@ async def test_graph_checkpoints_preview_then_resumes_comment_only_commit(
         assert git.posted[0]["comments"][0].severity == Severity.HIGH
         assert store.result["status"] == "completed"
     if source_mode == "local":
+        # Preparation and publication both find their programs outside the caller's checkout.
+        assert git.local_sources == [local_repository, local_repository]
         assert git.clone_calls == 0
         assert git.worktree_calls == 0
         assert len(git.local_validation_calls) == 4
@@ -500,6 +504,7 @@ async def test_graph_checkpoints_preview_then_resumes_comment_only_commit(
         assert FakeReviewerAgent.profiles
         assert all(profile.denied_paths == (local_secret,) for profile in FakeReviewerAgent.profiles)
     else:
+        assert git.local_sources == [None, None]
         assert git.clone_calls == 1
         assert git.worktree_calls == 1
         assert git.local_validation_calls == []

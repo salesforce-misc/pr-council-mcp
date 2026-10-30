@@ -2,7 +2,13 @@ import pytest
 from localmcp.config import ServerConfig
 from pydantic import ValidationError
 
-from pr_council.config import ConfigError, PRReviewLimitsConfig, PRReviewModelsConfig, parse_config
+from pr_council.config import (
+    ConfigError,
+    LocalGitConfigPattern,
+    PRReviewLimitsConfig,
+    PRReviewModelsConfig,
+    parse_config,
+)
 from pr_council.review.models import Severity
 
 
@@ -116,3 +122,86 @@ def test_github_accounts_are_normalized_and_bound_to_allowed_hosts() -> None:
 def test_github_accounts_reject_invalid_entries(accounts: dict[str, str], message: str) -> None:
     with pytest.raises(ConfigError, match=message):
         parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"github_accounts": accounts}}))
+
+
+def test_allowed_local_git_config_normalizes_keys_and_accepts_exact_values_or_patterns() -> None:
+    config = parse_config(
+        ServerConfig(
+            name="pr-council-mcp",
+            values={
+                "pr_review": {
+                    "allowed_local_git_config": {
+                        "Filter.LFS.Clean": ["git-lfs clean -- %f"],
+                        "filter.lfs.clean": ["git-lfs clean -- %f"],
+                        "Tool.Origin.Mode": ["fast"],
+                        "tool.last-run": {"pattern": "[0-9]{1,12}"},
+                        "tool.empty": [""],
+                    }
+                }
+            },
+        )
+    )
+
+    # Git ignores case in section and variable names but not in subsections.
+    rules = config.pr_review.allowed_local_git_config
+    assert set(rules) == {"filter.LFS.clean", "filter.lfs.clean", "tool.Origin.mode", "tool.last-run", "tool.empty"}
+    assert rules["filter.LFS.clean"] == ["git-lfs clean -- %f"]
+    assert rules["tool.last-run"] == LocalGitConfigPattern(pattern="[0-9]{1,12}")
+    assert rules["tool.empty"] == [""]
+
+
+@pytest.mark.parametrize(
+    ("rules", "message"),
+    [
+        ({"nodot": ["x"]}, "is not a Git configuration key"),
+        ({"tool.": ["x"]}, "is not a Git configuration key"),
+        ({"tool.1mode": ["x"]}, "is not a Git configuration key"),
+        ({"include.path": ["extra.cfg"]}, 'cannot allow "include.path"'),
+        ({"includeIf.gitdir:/work/.path": ["extra.cfg"]}, "cannot allow"),
+        ({"core.hooksPath": ["/dev/null"]}, "cannot allow"),
+        ({"filter.lfs.clean": {"pattern": "git-lfs .*"}}, "runs a command and must list exact values"),
+        ({"core.fsmonitor": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"pager.log": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"mergetool.Tool.cmd": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"remote.origin.uploadPack": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"submodule.child.update": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"gpg.ssh.defaultKeyCommand": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"imap.tunnel": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"sendemail.sendmailCmd": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"sendemail.work.sendmailCmd": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        ({"hook.lint.command": {"pattern": ".*"}}, "runs a command and must list exact values"),
+        # Built-in keys keep their own checks, such as remote URL transport and credential validation.
+        ({"Remote.Origin.URL": ["ext::sh -c true"]}, "is accepted by default and cannot be listed"),
+        ({"filter.lfs.required": ["true"]}, "is accepted by default and cannot be listed"),
+        ({"tool.mode": []}, "at least 1 item"),
+        ({"tool.mode": ["x"] * 33}, "at most 32 items"),
+        ({"tool.mode": ["a" * 1025]}, "at most 1024 characters"),
+        ({"tool.mode": ["a\0b"]}, "cannot contain NUL"),
+        ({"tool.mode": {"pattern": "("}}, "not a valid regular expression"),
+        ({"tool.mode": {"pattern": ""}}, "at least 1 character"),
+        ({"tool.mode": ["a"], "Tool.Mode": ["b"]}, "duplicate key"),
+        ({"tool.Sub.mode": ["a"], "TOOL.Sub.MODE": ["b"]}, "duplicate key"),
+    ],
+)
+def test_allowed_local_git_config_rejects_invalid_rules(rules: dict[str, object], message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"allowed_local_git_config": rules}}))
+
+
+@pytest.mark.parametrize(
+    ("rule", "message"),
+    [
+        ({"pattern": ".*"}, '"credential.<subsection>.helper" runs a command'),
+        ([], "credential.<subsection>.helper.*at least 1 item"),
+        (["secret-token" * 100], "credential.<subsection>.helper.*at most 1024 characters"),
+        ({"pattern": "(secret-token"}, "credential.<subsection>.helper.*not a valid regular expression"),
+        ({"pattern": ".*", "note": "secret-token"}, "credential.<subsection>.helper.*Extra inputs are not permitted"),
+    ],
+)
+def test_allowed_local_git_config_errors_never_echo_subsections_or_input(rule: object, message: str) -> None:
+    rules = {"credential.https://user:secret-token@example.invalid.helper": rule}
+
+    with pytest.raises(ConfigError, match=message) as error:
+        parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"allowed_local_git_config": rules}}))
+    assert "secret-token" not in str(error.value)
+    assert error.value.__cause__ is None and error.value.__suppress_context__

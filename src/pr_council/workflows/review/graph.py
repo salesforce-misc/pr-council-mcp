@@ -404,15 +404,18 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
         ref = PrRef.model_validate(state["ref"])
         source_mode = ReviewSourceMode(state["request"].get("source_mode", ReviewSourceMode.MANAGED.value))
         github_account = state["request"].get("github_account")
-        git = deps.git.bind(ref.host, github_account)
+        local_source: Path | None = None
+        if source_mode == ReviewSourceMode.LOCAL:
+            raw_local_path = state["request"].get("local_source_path")
+            if not isinstance(raw_local_path, str):
+                raise ReviewError("local source operation is missing its repository path")
+            local_source = Path(raw_local_path)
+        git = deps.git.bind(ref.host, github_account, local_source=local_source)
         async with deps.lock.acquire(ref.repo_key):
             base_sha, advertised_head = await git.pr_shas(ref)
             head_sha = advertised_head
-            if source_mode == ReviewSourceMode.LOCAL:
-                raw_local_path = state["request"].get("local_source_path")
-                if not isinstance(raw_local_path, str):
-                    raise ReviewError("local source operation is missing its repository path")
-                repo_path = Path(raw_local_path)
+            if local_source is not None:
+                repo_path = local_source
                 worktree_path = repo_path
                 local_snapshot = await git.validate_local_source(
                     repo_path,
@@ -906,12 +909,16 @@ def build_review_graph(deps: ReviewGraphDeps, checkpointer: Any) -> Any:
             raise ReviewError("commit revision or payload hash does not match the preview")
         await deps.store.update(state["operation_id"], status=OperationStatus.COMMITTING)
         ref = PrRef.model_validate(state["ref"])
+        source_mode = ReviewSourceMode(state.get("source_mode", ReviewSourceMode.MANAGED.value))
         # Publish as the account the operation was prepared with, even if the mapping has since changed.
-        git = deps.git.bind(ref.host, state["request"].get("github_account"))
+        git = deps.git.bind(
+            ref.host,
+            state["request"].get("github_account"),
+            local_source=Path(state["worktree_path"]) if source_mode == ReviewSourceMode.LOCAL else None,
+        )
         current_user = await git.authenticated_user(ref.host)
         if current_user != state["owner_login"]:
             raise ReviewError("authenticated GitHub user changed after the review was prepared")
-        source_mode = ReviewSourceMode(state.get("source_mode", ReviewSourceMode.MANAGED.value))
         local_source_error: ReviewError | None = None
         async with deps.lock.acquire(ref.repo_key):
             current_base, current_head = await git.pr_shas(ref)

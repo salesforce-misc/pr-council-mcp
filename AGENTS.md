@@ -137,8 +137,13 @@ and already contain the PR base/head objects and merge base. Existing ignored pa
 authority; tracked symlinks must resolve inside the repository; and Git alternates outside the repository/common
 metadata roots are unsupported. These properties and the ignored-path snapshot are revalidated before preview and
 publication. Local repositories are caller-owned and must never be removed or mutated during cleanup.
-Local metadata validation rejects executable, include-based, or credential-bearing repository configuration; model
-sandboxes deny hooks, reflogs, and transient Git state while retaining the minimal repository config needed by Git.
+Local metadata validation reads every non-command config scope, including per-worktree `config.worktree`, and
+rejects executable, include-based, or credential-bearing repository configuration unless
+`[pr_review.allowed_local_git_config]` permits the value; model sandboxes deny hooks, reflogs, and transient Git
+state while retaining the minimal repository config needed by Git. Each submodule's metadata and configuration is
+validated before any recursive command such as `git status` can run its filters. Every trusted `git` and `gh` call
+drops relative `PATH` entries and directories inside the repository it runs in or the local-source checkout, so
+neither can supply the programs it runs.
 
 Local mode intentionally reviews the caller-owned live checkout so it can avoid a second full worktree for very large
 trees. The server and checkout owner therefore share one OS-UID trust boundary: callers must keep the checkout stable
@@ -264,6 +269,14 @@ At start, each selected model receives its role's effort when its catalog spec a
 per-model resolution is persisted with the model selection. The provider remains the authority on which levels a model
 supports.
 
+`[pr_review.allowed_local_git_config]` maps extra local-source Git config keys to exact values or a full-match
+`pattern`. Section and variable names are lowercased while subsections keep their case, as Git compares them. Known
+keys whose values Git runs as programs require exact values. Keys accepted by default cannot be listed, so their own
+checks, such as remote URL validation, always apply, and `include`, `includeIf`, and `core.hooksPath` are never
+allowable. Validation and configuration errors name the key without its subsection, which could carry a credential,
+and never echo its value. The allowlist is read from current configuration, not persisted per operation: it governs
+a security check, so a tightened allowlist must apply to in-flight operations when they revalidate.
+
 `[pr_review.limits]` bounds per-pass Bash calls, matrix size, model concurrency, prepared repository size, command
 timeout, attempts per model call, and retry delays. Every Bash result reports the remaining budget. Model output is
 deliberately uncapped: localmcplib requests each model's maximum, because a response truncated mid-reasoning must be
@@ -308,7 +321,7 @@ uv run pytest
 make ci                                 # format-check, lint, strict mypy, tests + coverage
 ```
 
-Runtime prerequisites are macOS or Linux, Python 3.12+, `git`, authenticated `gh`, and `rg`. Linux also requires
+Runtime prerequisites are macOS or Linux, Python 3.12+, `git` 2.26+, authenticated `gh`, and `rg`. Linux also requires
 bubblewrap 0.6.3 or newer, Bash, libseccomp, and `file` and `git` from the system or a supported Nix profile, plus
 unprivileged user and cgroup namespaces. The checked-in `.mcp.json` and `opencode.jsonc` start the module through
 `uv` when the client is launched from the repository root. Machine-local configuration that contains credentials must

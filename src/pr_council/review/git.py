@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from pr_council.config import DEFAULT_ALLOWED_HOSTS
+from pr_council.config import (
+    DEFAULT_ALLOWED_HOSTS,
+    SAFE_LOCAL_GIT_CONFIG_KEY,
+    LocalGitConfigPattern,
+    git_config_key_label,
+    normalize_git_config_key,
+)
 from pr_council.review.models import PreviewComment, PrRef, ReviewError
 
 _SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -24,17 +30,11 @@ _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _COMMAND_TIMEOUT_SECONDS = 300.0
 _MAX_LOCAL_SANDBOX_EXCLUSIONS = 4_096
 _MAX_LOCAL_SUBMODULES = 1_024
-_SAFE_LOCAL_CONFIG_KEY = re.compile(
-    r"^(?:"
-    r"core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks|worktree)|"
-    r"extensions\.(?:objectformat|worktreeconfig|partialclone)|"
-    r"remote\..+\.(?:url|fetch|mirror|promisor|partialclonefilter|tagopt)|"
-    r"branch\..+\.(?:remote|merge|rebase)|"
-    r"submodule\..+\.(?:url|active)"
-    r")$"
-)
+# A boolean core.fsmonitor selects Git's built-in daemon; any other value is a hook command.
+_BOOLEAN_CONFIG_VALUE = re.compile(r"^(?:true|yes|on|1|false|no|off|0|)$", re.IGNORECASE)
+_MAX_LOCAL_CONFIG_PATTERN_VALUE = 1_024
 _GITHUB_TOKEN_ENV_VARS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
-_REMOTE_URL_CONFIG_KEY = re.compile(r"^(?:remote|submodule)\..+\.url$")
+_REMOTE_URL_CONFIG_KEY = re.compile(r"^(?:remote\..+\.(?:url|pushurl)|submodule\..+\.url)$")
 _SENSITIVE_GIT_METADATA_NAMES = (
     "AUTO_MERGE",
     "BISECT_LOG",
@@ -61,6 +61,28 @@ class LocalSourceSnapshot:
 
     git_metadata_root: Path
     excluded_paths: tuple[Path, ...]
+
+
+def _trusted_search_path(env: Mapping[str, str], untrusted: Collection[Path]) -> str:
+    """Return env's program search path without entries that a working directory or checkout could supply.
+
+    Programs start after changing into their working directory, so an empty or relative entry resolves inside it.
+    Entries are passed on resolved, so a symlink retargeted after this check cannot redirect them.
+    """
+    roots = [root.resolve() for root in untrusted]
+    entries: dict[str, None] = {}
+    for entry in os.get_exec_path(env):
+        if not os.path.isabs(entry):
+            continue
+        try:
+            resolved = Path(entry).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if not any(resolved.is_relative_to(root) for root in roots):
+            entries[os.fspath(resolved)] = None
+    if not entries:
+        raise ReviewError("PATH has no absolute directories outside the source checkout")
+    return os.pathsep.join(entries)
 
 
 def parse_pr_url(value: str, *, allowed_hosts: Collection[str] = DEFAULT_ALLOWED_HOSTS) -> PrRef:
@@ -93,14 +115,22 @@ class GitHubCli:
         max_repository_bytes: int = 5 * 1024 * 1024 * 1024,
         allowed_hosts: Collection[str] = DEFAULT_ALLOWED_HOSTS,
         accounts: Mapping[str, str] | None = None,
+        allowed_local_config: Mapping[str, Collection[str] | LocalGitConfigPattern] | None = None,
     ):
         self.max_output_bytes = max_output_bytes
         self.command_timeout_seconds = command_timeout_seconds
         self.max_repository_bytes = max_repository_bytes
         self.allowed_hosts = frozenset(allowed_hosts)
         self.accounts = {key.lower(): login for key, login in (accounts or {}).items()}
+        self.allowed_local_config: dict[str, frozenset[str] | re.Pattern[str]] = {
+            normalize_git_config_key(key): (
+                re.compile(rule.pattern) if isinstance(rule, LocalGitConfigPattern) else frozenset(rule)
+            )
+            for key, rule in (allowed_local_config or {}).items()
+        }
         self._bound_host: str | None = None
         self._account: str | None = None
+        self._local_source: Path | None = None
 
     def account_for(self, ref: PrRef) -> str | None:
         """Return the mapped login for a PR, preferring repository over owner over host matches."""
@@ -110,18 +140,20 @@ class GitHubCli:
                 return self.accounts[key]
         return None
 
-    def bind(self, host: str, account: str | None) -> GitHubCli:
+    def bind(self, host: str, account: str | None, *, local_source: Path | None = None) -> GitHubCli:
         """Return an adapter whose GitHub calls for ``host`` authenticate as ``account``.
 
         Each call receives the account's token in its own environment, so nothing
         shared, such as gh's active account, is changed. ``None`` keeps the
-        inherited environment.
+        inherited environment. Every program the adapter starts for a local review
+        is found outside ``local_source``, the caller's checkout.
         """
         if host not in self.allowed_hosts:
             raise ReviewError("GitHub host is not allowed by server configuration")
         bound = copy.copy(self)
         bound._bound_host = host
         bound._account = account
+        bound._local_source = local_source
         return bound
 
     async def _communicate(self, process: asyncio.subprocess.Process, command: str) -> tuple[bytes, bytes]:
@@ -170,6 +202,11 @@ class GitHubCli:
     async def _run(
         self, command: str, args: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None
     ) -> str:
+        base_env = os.environ if env is None else env
+        # Without cwd, a command runs in the server's own directory. Its absolute PATH entries stay the operator's
+        # choice: excluding them would drop every entry for a server started in "/" or the home directory.
+        untrusted = [root for root in (cwd, self._local_source) if root is not None]
+        env = {**base_env, "PATH": _trusted_search_path(base_env, untrusted)}
         try:
             process = await asyncio.create_subprocess_exec(
                 command,
@@ -251,10 +288,13 @@ class GitHubCli:
         return None if network is None else {**network, "GIT_NO_LAZY_FETCH": "1"}
 
     @staticmethod
-    def _local_git_env() -> dict[str, str]:
+    def _local_git_env(repository: Path) -> dict[str, str]:
         env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
         return {
             **env,
+            # Git, and the shell that runs allowed filter commands, may start in a submodule, so no program may come
+            # from anywhere in the repository.
+            "PATH": _trusted_search_path(env, [repository]),
             "GIT_CONFIG_COUNT": "2",
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_KEY_0": "core.fsmonitor",
@@ -451,6 +491,38 @@ class GitHubCli:
             raise ReviewError("could not validate linked-worktree Git metadata") from exc
         return common_dir
 
+    def _validate_local_config_entry(self, key: str, value: str | None) -> None:
+        normalized_key = key.lower()
+        if SAFE_LOCAL_GIT_CONFIG_KEY.fullmatch(normalized_key) or (
+            normalized_key == "core.fsmonitor" and (value is None or _BOOLEAN_CONFIG_VALUE.fullmatch(value))
+        ):
+            if _REMOTE_URL_CONFIG_KEY.fullmatch(normalized_key):
+                url = value or ""
+                parsed_url = urlparse(url)
+                if "::" in url or parsed_url.scheme not in {"", "file", "git", "http", "https", "ssh"}:
+                    raise ReviewError("local source Git remote URL uses an executable or unsupported transport")
+                if parsed_url.password is not None or (
+                    parsed_url.scheme in {"http", "https"}
+                    and (parsed_url.username is not None or parsed_url.query or parsed_url.fragment)
+                ):
+                    raise ReviewError("local source Git remote URL contains credentials or secret-bearing fields")
+            return
+        label = git_config_key_label(key)
+        rule = self.allowed_local_config.get(normalize_git_config_key(key))
+        if rule is None:
+            raise ReviewError(f'local source Git configuration key "{label}" is not safe for model access')
+        # A key written without "=" is boolean true. Values are never echoed: an unexpected one may hold a credential.
+        candidate = "true" if value is None else value
+        if not (
+            candidate in rule
+            if isinstance(rule, frozenset)
+            else len(candidate) <= _MAX_LOCAL_CONFIG_PATTERN_VALUE and rule.fullmatch(candidate)
+        ):
+            raise ReviewError(
+                f'local source Git configuration key "{label}" has a value that allowed_local_git_config does not '
+                "permit"
+            )
+
     async def validate_local_source(
         self,
         source_path: Path,
@@ -475,7 +547,7 @@ class GitHubCli:
         if not sandbox_root.is_dir() or not repository.is_dir() or not repository.is_relative_to(sandbox_root):
             raise ReviewError("local source repository is outside the server working-directory sandbox")
 
-        git_env = self._local_git_env()
+        git_env = self._local_git_env(repository)
         top_level_raw = (await self._run("git", ["rev-parse", "--show-toplevel"], cwd=repository, env=git_env)).strip()
         try:
             top_level = Path(top_level_raw).resolve(strict=True)
@@ -500,29 +572,23 @@ class GitHubCli:
         metadata_roots = {common_dir}
 
         async def validate_local_config(worktree: Path) -> None:
+            # Every scope except the server's own command-line overrides, including the per-worktree file that
+            # extensions.worktreeConfig enables. Includes are listed as keys, and rejected, rather than followed.
             raw_config = await self._run(
                 "git",
-                ["config", "--local", "--null", "--list"],
+                ["config", "--list", "--show-scope", "--no-includes", "--null"],
                 cwd=worktree,
                 env=git_env,
             )
-            for entry in (value for value in raw_config.split("\0") if value):
-                try:
-                    key, value = entry.split("\n", 1)
-                except ValueError as exc:
-                    raise ReviewError("local source contains malformed Git configuration") from exc
-                normalized_key = key.lower()
-                if not _SAFE_LOCAL_CONFIG_KEY.fullmatch(normalized_key):
-                    raise ReviewError(f'local source Git configuration key "{key}" is not safe for model access')
-                if _REMOTE_URL_CONFIG_KEY.fullmatch(normalized_key):
-                    parsed_url = urlparse(value)
-                    if "::" in value or parsed_url.scheme not in {"", "file", "git", "http", "https", "ssh"}:
-                        raise ReviewError("local source Git remote URL uses an executable or unsupported transport")
-                    if parsed_url.password is not None or (
-                        parsed_url.scheme in {"http", "https"}
-                        and (parsed_url.username is not None or parsed_url.query or parsed_url.fragment)
-                    ):
-                        raise ReviewError("local source Git remote URL contains credentials or secret-bearing fields")
+            fields = raw_config.split("\0")
+            if fields.pop() or len(fields) % 2:
+                raise ReviewError("local source contains malformed Git configuration")
+            for scope, entry in zip(fields[::2], fields[1::2], strict=True):
+                if scope == "command":
+                    continue
+                key, separator, value = entry.partition("\n")
+                # A key written without "=" has no value; Git reads it as boolean true.
+                self._validate_local_config_entry(key, value if separator else None)
 
         await validate_local_config(repository)
 
@@ -570,85 +636,17 @@ class GitHubCli:
         )
         if resolved_head != head_sha.lower():
             raise ReviewError("local source HEAD does not match the pull request head")
-        status = await self._run(
-            "git",
-            ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"],
-            cwd=repository,
-            env=git_env,
-        )
-        if status:
-            raise ReviewError("local source worktree must be clean, including untracked files and submodules")
 
-        await self._run("git", ["cat-file", "-e", f"{base_sha}^{{commit}}"], cwd=repository, env=git_env)
-        await self._run("git", ["cat-file", "-e", f"{head_sha}^{{commit}}"], cwd=repository, env=git_env)
-        await self._run("git", ["merge-base", base_sha, head_sha], cwd=repository, env=git_env)
+        # Ordered set of the repository and its initialized submodules. A recursive status runs each submodule's
+        # configured filters, so every submodule's location and configuration is validated before anything recurses.
+        worktrees: dict[Path, None] = {}
 
-        tracked_output = await self._run(
-            "git",
-            ["ls-files", "--stage", "--recurse-submodules", "-z"],
-            cwd=repository,
-            env=git_env,
-        )
-        tracked_entries: dict[str, str] = {}
-        for record in tracked_output.split("\0"):
-            if not record:
-                continue
-            try:
-                metadata, name = record.split("\t", 1)
-                mode = metadata.split(" ", 1)[0]
-            except ValueError as exc:
-                raise ReviewError("local source returned malformed tracked-path metadata") from exc
-            tracked_entries[name] = mode
-        for name, mode in tracked_entries.items():
-            if mode != "120000":
-                continue
-            relative = Path(name)
-            if relative.is_absolute() or not relative.parts or ".." in relative.parts:
-                raise ReviewError("local source contains an unsafe tracked path")
-            candidate = repository.joinpath(*relative.parts)
-            try:
-                resolved = candidate.resolve(strict=True)
-            except OSError as exc:
-                raise ReviewError("local source contains an unreadable tracked symlink") from exc
-            if not resolved.is_relative_to(repository):
-                raise ReviewError("local source contains a tracked symlink outside the repository")
-
-        excluded_paths: set[Path] = set()
-        visited_worktrees: set[Path] = set()
-
-        async def collect_ignored_paths(worktree: Path) -> None:
-            if worktree in visited_worktrees:
+        async def discover_submodules(worktree: Path) -> None:
+            if worktree in worktrees:
                 raise ReviewError("local source contains a recursive submodule worktree")
-            visited_worktrees.add(worktree)
-            if len(visited_worktrees) > _MAX_LOCAL_SUBMODULES:
+            worktrees[worktree] = None
+            if len(worktrees) > _MAX_LOCAL_SUBMODULES:
                 raise ReviewError("local source has too many initialized submodules to validate safely")
-
-            ignored_output = await self._run(
-                "git",
-                [
-                    "ls-files",
-                    "--others",
-                    "--ignored",
-                    "--exclude-standard",
-                    "--directory",
-                    "--no-empty-directory",
-                    "-z",
-                ],
-                cwd=worktree,
-                env=git_env,
-            )
-            for name in (value for value in ignored_output.split("\0") if value):
-                relative = Path(name.rstrip("/"))
-                if relative.is_absolute() or not relative.parts or ".." in relative.parts:
-                    raise ReviewError("local source contains an unsafe ignored path")
-                candidate = worktree.joinpath(*relative.parts)
-                try:
-                    candidate.lstat()
-                except OSError as exc:
-                    raise ReviewError("local source contains an unreadable ignored path") from exc
-                excluded_paths.add(candidate)
-                if len(excluded_paths) > _MAX_LOCAL_SANDBOX_EXCLUSIONS:
-                    raise ReviewError("local source has too many ignored paths to sandbox safely")
 
             direct_entries = await self._run("git", ["ls-files", "--stage", "-z"], cwd=worktree, env=git_env)
             for record in (value for value in direct_entries.split("\0") if value):
@@ -693,9 +691,81 @@ class GitHubCli:
                     raise ReviewError("local source submodule Git metadata is outside model-readable sandbox roots")
                 metadata_roots.add(submodule_common)
                 await validate_local_config(submodule)
-                await collect_ignored_paths(submodule)
+                await discover_submodules(submodule)
 
-        await collect_ignored_paths(repository)
+        await discover_submodules(repository)
+
+        status = await self._run(
+            "git",
+            ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"],
+            cwd=repository,
+            env=git_env,
+        )
+        if status:
+            raise ReviewError("local source worktree must be clean, including untracked files and submodules")
+
+        await self._run("git", ["cat-file", "-e", f"{base_sha}^{{commit}}"], cwd=repository, env=git_env)
+        await self._run("git", ["cat-file", "-e", f"{head_sha}^{{commit}}"], cwd=repository, env=git_env)
+        await self._run("git", ["merge-base", base_sha, head_sha], cwd=repository, env=git_env)
+
+        tracked_output = await self._run(
+            "git",
+            ["ls-files", "--stage", "--recurse-submodules", "-z"],
+            cwd=repository,
+            env=git_env,
+        )
+        tracked_entries: dict[str, str] = {}
+        for record in tracked_output.split("\0"):
+            if not record:
+                continue
+            try:
+                metadata, name = record.split("\t", 1)
+                mode = metadata.split(" ", 1)[0]
+            except ValueError as exc:
+                raise ReviewError("local source returned malformed tracked-path metadata") from exc
+            tracked_entries[name] = mode
+        for name, mode in tracked_entries.items():
+            if mode != "120000":
+                continue
+            relative = Path(name)
+            if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                raise ReviewError("local source contains an unsafe tracked path")
+            candidate = repository.joinpath(*relative.parts)
+            try:
+                resolved = candidate.resolve(strict=True)
+            except OSError as exc:
+                raise ReviewError("local source contains an unreadable tracked symlink") from exc
+            if not resolved.is_relative_to(repository):
+                raise ReviewError("local source contains a tracked symlink outside the repository")
+
+        excluded_paths: set[Path] = set()
+        for worktree in worktrees:
+            ignored_output = await self._run(
+                "git",
+                [
+                    "ls-files",
+                    "--others",
+                    "--ignored",
+                    "--exclude-standard",
+                    "--directory",
+                    "--no-empty-directory",
+                    "-z",
+                ],
+                cwd=worktree,
+                env=git_env,
+            )
+            for name in (value for value in ignored_output.split("\0") if value):
+                relative = Path(name.rstrip("/"))
+                if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                    raise ReviewError("local source contains an unsafe ignored path")
+                candidate = worktree.joinpath(*relative.parts)
+                try:
+                    candidate.lstat()
+                except OSError as exc:
+                    raise ReviewError("local source contains an unreadable ignored path") from exc
+                excluded_paths.add(candidate)
+                if len(excluded_paths) > _MAX_LOCAL_SANDBOX_EXCLUSIONS:
+                    raise ReviewError("local source has too many ignored paths to sandbox safely")
 
         for metadata_root in metadata_roots:
             for name in _SENSITIVE_GIT_METADATA_NAMES:

@@ -30,6 +30,7 @@ from localmcp.llm import DEFAULT_MODEL_REGISTRY, ModelConfigurationError
 
 from pr_council.config import (
     Config,
+    LocalGitConfigPattern,
     PRReviewConfig,
     PRReviewLimitsConfig,
     PRReviewModelsConfig,
@@ -688,6 +689,25 @@ async def test_run_applies_the_snapshotted_model_concurrency_limit(monkeypatch, 
 
 def _account_runtime(state_root: Path, accounts: dict[str, str]) -> ReviewRuntime:
     return _runtime(Config(pr_review=PRReviewConfig(github_accounts=accounts)), state_root)
+
+
+def test_runtime_passes_allowed_local_git_config_to_the_git_adapter(tmp_path):
+    config = Config(
+        pr_review=PRReviewConfig(
+            allowed_local_git_config={
+                "Filter.lfs.Clean": ["git-lfs clean -- %f"],
+                "tool.last-run": LocalGitConfigPattern(pattern="[0-9]+"),
+            }
+        )
+    )
+
+    runtime = _runtime(config, tmp_path / "state")
+
+    rules = runtime.git.allowed_local_config
+    assert rules["filter.lfs.clean"] == frozenset({"git-lfs clean -- %f"})
+    rule = rules["tool.last-run"]
+    assert not isinstance(rule, frozenset)
+    assert rule.fullmatch("1700000000")
 
 
 async def _start_review(runtime: ReviewRuntime, pr_url: str = "https://github.com/Acme/repo/pull/7"):
