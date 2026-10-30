@@ -154,8 +154,7 @@ class LocalGitConfigPattern(BaseModel):
 
 
 class PRReviewConfig(BaseModel):
-    # Errors name allowed_local_git_config keys only through git_config_key_label, never by echoing input.
-    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS), min_length=1, max_length=20)
     models: PRReviewModelsConfig = Field(default_factory=PRReviewModelsConfig)
@@ -232,9 +231,22 @@ class Config(BaseModel):
     pr_review: PRReviewConfig = Field(default_factory=PRReviewConfig)
 
 
+def _describe_validation_error(exc: ValidationError) -> str:
+    """Describe errors without their input or an allowed_local_git_config key's subsection, either of which may carry
+    a credential."""
+    problems: list[str] = []
+    for error in exc.errors(include_url=False, include_context=False, include_input=False):
+        location = [str(part) for part in error["loc"]]
+        if location[:2] == ["pr_review", "allowed_local_git_config"] and len(location) > 2:
+            location[2] = git_config_key_label(location[2])
+        problems.append(f"{'.'.join(location)}: {error['msg']}")
+    return "; ".join(problems)
+
+
 def parse_config(config: ServerConfig) -> Config:
     """Validate the application-owned part of this server's effective config."""
     try:
         return Config.model_validate(config.values)
     except ValidationError as exc:
-        raise ConfigError(f"invalid application configuration: {exc}") from exc
+        # Not chained: the original error's text would repeat what the description omits.
+        raise ConfigError(f"invalid application configuration: {_describe_validation_error(exc)}") from None

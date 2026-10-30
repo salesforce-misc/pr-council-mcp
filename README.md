@@ -46,8 +46,8 @@ AR) also count findings outside it, as the judge classifies them. Scores pool ev
 ## Quickstart
 
 The server runs on macOS and Linux and requires Python 3.12+. Install
-[`uv`](https://docs.astral.sh/uv/getting-started/installation/), `git`, [`rg`](https://github.com/BurntSushi/ripgrep),
-and [`gh`](https://cli.github.com/), then authenticate GitHub:
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/), `git` 2.26 or newer,
+[`rg`](https://github.com/BurntSushi/ripgrep), and [`gh`](https://cli.github.com/), then authenticate GitHub:
 
 ```bash
 gh auth login

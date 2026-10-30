@@ -321,7 +321,7 @@ uv run pytest
 make ci                                 # format-check, lint, strict mypy, tests + coverage
 ```
 
-Runtime prerequisites are macOS or Linux, Python 3.12+, `git`, authenticated `gh`, and `rg`. Linux also requires
+Runtime prerequisites are macOS or Linux, Python 3.12+, `git` 2.26+, authenticated `gh`, and `rg`. Linux also requires
 bubblewrap 0.6.3 or newer, Bash, libseccomp, and `file` and `git` from the system or a supported Nix profile, plus
 unprivileged user and cgroup namespaces. The checked-in `.mcp.json` and `opencode.jsonc` start the module through
 `uv` when the client is launched from the repository root. Machine-local configuration that contains credentials must

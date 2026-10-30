@@ -188,9 +188,20 @@ def test_allowed_local_git_config_rejects_invalid_rules(rules: dict[str, object]
         parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"allowed_local_git_config": rules}}))
 
 
-def test_allowed_local_git_config_errors_never_echo_subsections_or_input() -> None:
-    rules = {"credential.https://user:secret-token@example.invalid.helper": {"pattern": ".*"}}
+@pytest.mark.parametrize(
+    ("rule", "message"),
+    [
+        ({"pattern": ".*"}, '"credential.<subsection>.helper" runs a command'),
+        ([], "credential.<subsection>.helper.*at least 1 item"),
+        (["secret-token" * 100], "credential.<subsection>.helper.*at most 1024 characters"),
+        ({"pattern": "(secret-token"}, "credential.<subsection>.helper.*not a valid regular expression"),
+        ({"pattern": ".*", "note": "secret-token"}, "credential.<subsection>.helper.*Extra inputs are not permitted"),
+    ],
+)
+def test_allowed_local_git_config_errors_never_echo_subsections_or_input(rule: object, message: str) -> None:
+    rules = {"credential.https://user:secret-token@example.invalid.helper": rule}
 
-    with pytest.raises(ConfigError, match='"credential.<subsection>.helper" runs a command') as error:
+    with pytest.raises(ConfigError, match=message) as error:
         parse_config(ServerConfig(name="pr-council-mcp", values={"pr_review": {"allowed_local_git_config": rules}}))
     assert "secret-token" not in str(error.value)
+    assert error.value.__cause__ is None and error.value.__suppress_context__
